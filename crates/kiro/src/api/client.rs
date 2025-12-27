@@ -38,12 +38,6 @@ impl KiroClient {
         let url = self.endpoint();
         let body_bytes = serde_json::to_vec(body)?;
 
-        log::info!(
-            "Kiro API request to {}: {}",
-            target,
-            String::from_utf8_lossy(&body_bytes)
-        );
-
         let request = Request::builder()
             .method(Method::POST)
             .uri(url)
