@@ -13,13 +13,6 @@ use std::pin::Pin;
 use super::config::PROVIDER_NAME;
 
 fn normalize_tool_input(tool_use: &LanguageModelToolUse) -> serde_json::Value {
-    log::info!(
-        "normalize_tool_input: name={}, raw_input={:?}, input={:?}",
-        tool_use.name,
-        tool_use.raw_input,
-        tool_use.input
-    );
-    
     if let serde_json::Value::Object(obj) = &tool_use.input {
         if !obj.is_empty() {
             return tool_use.input.clone();
@@ -35,14 +28,6 @@ fn normalize_tool_input(tool_use: &LanguageModelToolUse) -> serde_json::Value {
     }
     
     serde_json::json!({})
-}
-
-fn is_read_tool(name: &str) -> bool {
-    let read_patterns = [
-        "read"
-    ];
-    let name_lower = name.to_lowercase();
-    read_patterns.iter().any(|p| name_lower.contains(p))
 }
 
 pub fn build_send_message_request(
@@ -67,12 +52,9 @@ pub fn build_send_message_request(
         let tools: Vec<ToolDefinition> = request
             .tools
             .iter()
-            .filter(|t| is_read_tool(&t.name))
             .map(|t| ToolDefinition::new(t.name.clone(), t.description.clone(), t.input_schema.clone()))
             .collect();
-        if !tools.is_empty() {
-            send_request = send_request.with_tools(tools);
-        }
+        send_request = send_request.with_tools(tools);
     }
 
     if !tool_results.is_empty() {
@@ -80,10 +62,6 @@ pub fn build_send_message_request(
     }
 
     send_request
-}
-
-fn is_title_generation_request(text: &str) -> bool {
-    text.contains("Generate a concise") && text.contains("word title")
 }
 
 fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::HistoryEntry>, String, Vec<ToolResult>) {
@@ -94,9 +72,30 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
     let mut tool_results = Vec::new();
     let mut pending_assistant_content = String::new();
     let mut pending_assistant_tool_uses: Vec<ToolUse> = Vec::new();
+    let mut system_prompt = String::new();
     
-    for (i, message) in request.messages.iter().enumerate() {
-        let is_last = i == request.messages.len() - 1;
+    for message in &request.messages {
+        if message.role == Role::System {
+            for content in &message.content {
+                if let MessageContent::Text(text) = content {
+                    if !text.is_empty() {
+                        if !system_prompt.is_empty() {
+                            system_prompt.push_str("\n\n");
+                        }
+                        system_prompt.push_str(text);
+                    }
+                }
+            }
+        }
+    }
+    
+    let non_system_messages: Vec<_> = request.messages.iter()
+        .filter(|m| m.role != Role::System)
+        .collect();
+    
+    for (i, message) in non_system_messages.iter().enumerate() {
+        let is_last = i == non_system_messages.len() - 1;
+        let is_first_user = i == 0 && message.role == Role::User;
         
         match message.role {
             Role::User => {
@@ -123,7 +122,7 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
                 for content in &message.content {
                     match content {
                         MessageContent::Text(text) => {
-                            if !text.is_empty() && !is_title_generation_request(text) {
+                            if !text.is_empty() {
                                 user_text.push_str(text);
                             }
                         }
@@ -147,12 +146,22 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
                 }
                 
                 if is_last {
-                    current_content = if msg_tool_results.is_empty() { user_text } else { String::new() };
+                    let final_content = if is_first_user && !system_prompt.is_empty() {
+                        format!("{}\n\n{}", system_prompt, user_text)
+                    } else {
+                        user_text
+                    };
+                    current_content = if msg_tool_results.is_empty() { final_content } else { String::new() };
                     tool_results = msg_tool_results;
                 } else if !user_text.is_empty() || !msg_tool_results.is_empty() {
+                    let final_content = if is_first_user && !system_prompt.is_empty() {
+                        format!("{}\n\n{}", system_prompt, user_text)
+                    } else {
+                        user_text
+                    };
                     history.push(HistoryEntry {
                         user_input_message: Some(UserInputMessage {
-                            content: user_text,
+                            content: final_content,
                             user_input_message_context: UserInputMessageContext {
                                 env_state: EnvState {
                                     operating_system: "linux".to_string(),
