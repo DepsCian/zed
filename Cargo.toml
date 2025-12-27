@@ -93,6 +93,7 @@ members = [
     "crates/journal",
     "crates/json_schema_store",
     "crates/keymap_editor",
+    "crates/kiro",
     "crates/language",
     "crates/language_extension",
     "crates/language_model",
@@ -324,6 +325,7 @@ install_cli = { path = "crates/install_cli" }
 journal = { path = "crates/journal" }
 json_schema_store = { path = "crates/json_schema_store" }
 keymap_editor = { path = "crates/keymap_editor" }
+kiro = { path = "crates/kiro" }
 language = { path = "crates/language" }
 language_extension = { path = "crates/language_extension" }
 language_model = { path = "crates/language_model" }
