@@ -38,6 +38,14 @@ const AVAILABLE_REGIONS: &[(&str, &str)] = &[
     ("eu-central-1", "EU (Frankfurt)"),
 ];
 
+pub use settings::KiroAvailableModel as AvailableModel;
+
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct KiroSettings {
+    pub region: String,
+    pub available_models: Vec<AvailableModel>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DeviceFlowPrompt {
     pub user_code: String,

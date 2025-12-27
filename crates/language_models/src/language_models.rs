@@ -18,6 +18,7 @@ use crate::provider::bedrock::BedrockLanguageModelProvider;
 use crate::provider::cloud::CloudLanguageModelProvider;
 use crate::provider::copilot_chat::CopilotChatLanguageModelProvider;
 use crate::provider::google::GoogleLanguageModelProvider;
+use crate::provider::kiro::KiroLanguageModelProvider;
 use crate::provider::lmstudio::LmStudioLanguageModelProvider;
 pub use crate::provider::mistral::MistralLanguageModelProvider;
 use crate::provider::ollama::OllamaLanguageModelProvider;
@@ -213,4 +214,12 @@ fn register_language_model_providers(
         cx,
     );
     registry.register_provider(Arc::new(CopilotChatLanguageModelProvider::new(cx)), cx);
+    registry.register_provider(
+        Arc::new(KiroLanguageModelProvider::new(
+            client.http_client(),
+            <dyn credentials_provider::CredentialsProvider>::global(cx),
+            cx,
+        )),
+        cx,
+    );
 }
