@@ -57,7 +57,8 @@ impl AwsEventStreamParser {
             self.buffer[3],
         ]) as usize;
 
-        if total_length < MIN_MESSAGE_LENGTH {
+        if total_length < MIN_MESSAGE_LENGTH || total_length > 1024 * 1024 {
+            self.buffer.clear();
             return Err(anyhow!("Invalid message length: {}", total_length));
         }
 
@@ -80,7 +81,9 @@ impl AwsEventStreamParser {
         ]);
 
         let computed_prelude_crc = crc32c(&self.buffer[0..8]);
+        
         if prelude_crc != computed_prelude_crc {
+            self.buffer.clear();
             return Err(anyhow!(
                 "Prelude CRC mismatch: expected {}, got {}",
                 prelude_crc,
@@ -285,7 +288,7 @@ fn crc32c(data: &[u8]) -> u32 {
         crc ^= *byte as u32;
         for _ in 0..8 {
             if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0x82F63B78;
+                crc = (crc >> 1) ^ 0xEDB88320;
             } else {
                 crc >>= 1;
             }
