@@ -8,7 +8,7 @@ use gpui::{AnyView, App, AsyncApp, ClipboardItem, Context, Entity, Subscription,
 use http_client::HttpClient;
 use kiro::{
     ApiError, BuilderIdToken, ChatEvent, DeviceFlowClient, DeviceRegistration, KiroClient,
-    KiroError, SendMessageRequest, TokenStorage, UserContext,
+    KiroError, ModelInfo, SendMessageRequest, TokenStorage, UserContext,
 };
 use language_model::{
     AuthenticateError, ConfigurationViewTargetAgent, IconOrSvg, LanguageModel,
@@ -64,11 +64,31 @@ impl Default for AuthStatus {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct KiroModelDefinition {
+    pub id: String,
+    pub name: String,
+    pub rate_multiplier: f64,
+}
+
+impl From<ModelInfo> for KiroModelDefinition {
+    fn from(info: ModelInfo) -> Self {
+        Self {
+            id: info.model_id,
+            name: info.model_name,
+            rate_multiplier: info.rate_multiplier,
+        }
+    }
+}
+
 pub struct KiroState {
     token: Option<BuilderIdToken>,
     registration: Option<DeviceRegistration>,
     auth_status: AuthStatus,
     region: String,
+    available_models: Vec<KiroModelDefinition>,
+    default_model_id: Option<String>,
+    models_loaded: bool,
     _settings_subscription: Subscription,
 }
 
@@ -96,6 +116,12 @@ impl KiroState {
     fn set_auth_status(&mut self, status: AuthStatus) {
         self.auth_status = status;
     }
+
+    fn set_available_models(&mut self, models: Vec<KiroModelDefinition>, default_id: Option<String>) {
+        self.available_models = models;
+        self.default_model_id = default_id;
+        self.models_loaded = true;
+    }
 }
 
 pub struct KiroLanguageModelProvider {
@@ -120,6 +146,9 @@ impl KiroLanguageModelProvider {
                 registration: None,
                 auth_status: AuthStatus::SignedOut,
                 region: DEFAULT_REGION.to_string(),
+                available_models: Vec::new(),
+                default_model_id: None,
+                models_loaded: false,
                 _settings_subscription: settings_subscription,
             }
         });
@@ -138,25 +167,76 @@ impl KiroLanguageModelProvider {
     fn load_stored_credentials(&self, cx: &mut App) {
         let storage = TokenStorage::new(self.credentials_provider.clone());
         let state = self.state.clone();
+        let http_client = self.http_client.clone();
 
         cx.spawn(async move |cx| {
             let token = storage.load_token(&cx).await.ok().flatten();
             let registration = storage.load_registration(&cx).await.ok().flatten();
 
-            cx.update(|cx| {
+            let region = cx.update(|cx| {
                 state.update(cx, |state, cx| {
-                    state.set_token(token);
+                    state.set_token(token.clone());
                     state.set_registration(registration);
                     cx.notify();
-                });
-            })
-            .ok();
+                    state.region.clone()
+                })
+            }).ok().unwrap_or_else(|| DEFAULT_REGION.to_string());
+
+            if let Some(token) = token {
+                if !token.is_expired() {
+                    Self::fetch_models_async(http_client, token, region, state, &cx).await;
+                }
+            }
         })
         .detach();
     }
 
-    fn create_language_model(&self) -> Arc<dyn LanguageModel> {
+    async fn fetch_models_async(
+        http_client: Arc<dyn HttpClient>,
+        token: BuilderIdToken,
+        region: String,
+        state: Entity<KiroState>,
+        cx: &AsyncApp,
+    ) {
+        let client = KiroClient::new(http_client, token, region);
+        
+        match client.list_available_models().await {
+            Ok(response) => {
+                let models: Vec<KiroModelDefinition> = response
+                    .models
+                    .into_iter()
+                    .map(KiroModelDefinition::from)
+                    .collect();
+                
+                let default_id = response.default_model.map(|m| m.model_id);
+
+                cx.update(|cx| {
+                    state.update(cx, |state, cx| {
+                        state.set_available_models(models, default_id);
+                        cx.notify();
+                    });
+                }).ok();
+            }
+            Err(e) => {
+                log::error!("Failed to fetch Kiro models: {:?}", e);
+            }
+        }
+    }
+
+    fn create_language_model(&self, model_def: &KiroModelDefinition) -> Arc<dyn LanguageModel> {
         Arc::new(KiroModel {
+            model_id: model_def.id.clone(),
+            model_name: model_def.name.clone(),
+            state: self.state.clone(),
+            http_client: self.http_client.clone(),
+            request_limiter: RateLimiter::new(4),
+        })
+    }
+
+    fn create_default_model(&self) -> Arc<dyn LanguageModel> {
+        Arc::new(KiroModel {
+            model_id: "auto".to_string(),
+            model_name: "Auto".to_string(),
             state: self.state.clone(),
             http_client: self.http_client.clone(),
             request_limiter: RateLimiter::new(4),
@@ -165,6 +245,24 @@ impl KiroLanguageModelProvider {
 
     fn region(&self, cx: &App) -> String {
         self.state.read(cx).region.clone()
+    }
+
+    fn refresh_models(&self, cx: &mut App) {
+        let state = self.state.clone();
+        let http_client = self.http_client.clone();
+
+        let (token, region) = {
+            let s = state.read(cx);
+            (s.token.clone(), s.region.clone())
+        };
+
+        if let Some(token) = token {
+            if !token.is_expired() {
+                cx.spawn(async move |cx| {
+                    Self::fetch_models_async(http_client, token, region, state, &cx).await;
+                }).detach();
+            }
+        }
     }
 }
 
@@ -189,16 +287,42 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
         IconOrSvg::Icon(IconName::AiZed)
     }
 
-    fn default_model(&self, _cx: &App) -> Option<Arc<dyn LanguageModel>> {
-        Some(self.create_language_model())
+    fn default_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>> {
+        let state = self.state.read(cx);
+        
+        if let Some(default_id) = &state.default_model_id {
+            if let Some(model_def) = state.available_models.iter().find(|m| &m.id == default_id) {
+                return Some(self.create_language_model(model_def));
+            }
+        }
+        
+        Some(self.create_default_model())
     }
 
-    fn default_fast_model(&self, _cx: &App) -> Option<Arc<dyn LanguageModel>> {
-        Some(self.create_language_model())
+    fn default_fast_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>> {
+        let state = self.state.read(cx);
+        
+        let fast_model = state.available_models.iter()
+            .find(|m| m.id.contains("haiku") || m.id == "auto");
+        
+        if let Some(model_def) = fast_model {
+            return Some(self.create_language_model(model_def));
+        }
+        
+        Some(self.create_default_model())
     }
 
-    fn provided_models(&self, _cx: &App) -> Vec<Arc<dyn LanguageModel>> {
-        vec![self.create_language_model()]
+    fn provided_models(&self, cx: &App) -> Vec<Arc<dyn LanguageModel>> {
+        let state = self.state.read(cx);
+        
+        if state.available_models.is_empty() {
+            return vec![self.create_default_model()];
+        }
+        
+        state.available_models
+            .iter()
+            .map(|model_def| self.create_language_model(model_def))
+            .collect()
     }
 
     fn is_authenticated(&self, cx: &App) -> bool {
@@ -207,6 +331,7 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
 
     fn authenticate(&self, cx: &mut App) -> Task<Result<(), AuthenticateError>> {
         if self.is_authenticated(cx) {
+            self.refresh_models(cx);
             return Task::ready(Ok(()));
         }
 
@@ -254,12 +379,21 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
                 Ok(token) => {
                     storage.save_token(&token, &cx).await?;
 
-                    cx.update(|cx| {
+                    let region_for_fetch = cx.update(|cx| {
                         state.update(cx, |state, cx| {
-                            state.set_token(Some(token));
+                            state.set_token(Some(token.clone()));
                             cx.notify();
-                        });
+                            state.region.clone()
+                        })
                     })?;
+
+                    KiroLanguageModelProvider::fetch_models_async(
+                        http_client,
+                        token,
+                        region_for_fetch,
+                        state,
+                        &cx,
+                    ).await;
 
                     Ok(())
                 }
@@ -667,6 +801,8 @@ impl Render for KiroConfigurationView {
 }
 
 pub struct KiroModel {
+    model_id: String,
+    model_name: String,
     state: Entity<KiroState>,
     http_client: Arc<dyn HttpClient>,
     request_limiter: RateLimiter,
@@ -674,11 +810,11 @@ pub struct KiroModel {
 
 impl LanguageModel for KiroModel {
     fn id(&self) -> LanguageModelId {
-        LanguageModelId::from("kiro-default".to_string())
+        LanguageModelId::from(format!("kiro-{}", self.model_id))
     }
 
     fn name(&self) -> LanguageModelName {
-        LanguageModelName::from("Kiro".to_string())
+        LanguageModelName::from(self.model_name.clone())
     }
 
     fn provider_id(&self) -> LanguageModelProviderId {
@@ -702,7 +838,7 @@ impl LanguageModel for KiroModel {
     }
 
     fn telemetry_id(&self) -> String {
-        "kiro/kiro-default".to_string()
+        format!("kiro/{}", self.model_id)
     }
 
     fn max_token_count(&self) -> u64 {
@@ -749,6 +885,7 @@ impl LanguageModel for KiroModel {
         let state = self.state.clone();
         let http_client = self.http_client.clone();
         let request_limiter = self.request_limiter.clone();
+        let model_id = self.model_id.clone();
 
         let state_result = state.read_with(cx, |state, _cx| {
             match &state.token {
@@ -774,7 +911,7 @@ impl LanguageModel for KiroModel {
             }
         };
 
-        let kiro_request = build_send_message_request(&request);
+        let kiro_request = build_send_message_request(&request, &model_id);
 
         let future = request_limiter.stream(async move {
             let client = KiroClient::new(http_client, token, region);
@@ -786,7 +923,7 @@ impl LanguageModel for KiroModel {
     }
 }
 
-fn build_send_message_request(request: &LanguageModelRequest) -> SendMessageRequest {
+fn build_send_message_request(request: &LanguageModelRequest, model_id: &str) -> SendMessageRequest {
     let content = request
         .messages
         .iter()
@@ -802,7 +939,13 @@ fn build_send_message_request(request: &LanguageModelRequest) -> SendMessageRequ
         .join("\n\n");
 
     let user_context = UserContext::for_zed();
-    SendMessageRequest::new(content, request.thread_id.clone(), &user_context)
+    let mut send_request = SendMessageRequest::new(content, request.thread_id.clone(), &user_context);
+    
+    if model_id != "auto" {
+        send_request = send_request.with_model(model_id.to_string());
+    }
+    
+    send_request
 }
 
 fn map_api_error_to_completion_error(error: ApiError) -> LanguageModelCompletionError {

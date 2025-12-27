@@ -6,6 +6,7 @@ pub mod types;
 pub use api::chat::{ChatEvent, SendMessageRequest};
 pub use api::client::KiroClient;
 pub use api::endpoints::{get_endpoint, get_oidc_endpoint};
+pub use api::models::{ListModelsRequest, ListModelsResponse, ModelInfo};
 pub use auth::device_flow::{DeviceAuthorizationResponse, DeviceFlowClient, PollError};
 pub use auth::storage::TokenStorage;
 pub use auth::token::{BuilderIdToken, DeviceRegistration};
