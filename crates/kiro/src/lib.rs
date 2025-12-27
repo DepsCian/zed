@@ -3,6 +3,7 @@ pub mod auth;
 pub mod streaming;
 pub mod types;
 
+pub use api::chat::{ChatEvent, SendMessageRequest};
 pub use api::client::KiroClient;
 pub use api::endpoints::{get_endpoint, get_oidc_endpoint};
 pub use auth::device_flow::{DeviceAuthorizationResponse, DeviceFlowClient, PollError};

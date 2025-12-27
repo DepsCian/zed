@@ -8,6 +8,8 @@ pub enum KiroError {
     Api(#[from] ApiError),
     #[error("network error: {0}")]
     Network(String),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }
