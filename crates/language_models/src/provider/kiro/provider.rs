@@ -1,3 +1,4 @@
+use chrono::Duration;
 use credentials_provider::CredentialsProvider;
 use gpui::{App, AppContext, AsyncApp, Entity};
 use http_client::HttpClient;
@@ -116,6 +117,7 @@ impl KiroLanguageModelProvider {
             max_tokens: model_def.max_tokens,
             state: self.state.clone(),
             http_client: self.http_client.clone(),
+            credentials_provider: self.credentials_provider.clone(),
             request_limiter: RateLimiter::new(4),
         })
     }
@@ -127,6 +129,7 @@ impl KiroLanguageModelProvider {
             max_tokens: 200000,
             state: self.state.clone(),
             http_client: self.http_client.clone(),
+            credentials_provider: self.credentials_provider.clone(),
             request_limiter: RateLimiter::new(4),
         })
     }
@@ -149,6 +152,61 @@ impl KiroLanguageModelProvider {
                 cx.spawn(async move |cx| {
                     Self::fetch_models_async(http_client, token, region, state, &cx).await;
                 }).detach();
+            }
+        }
+    }
+
+    pub async fn ensure_valid_token(
+        http_client: Arc<dyn HttpClient>,
+        credentials_provider: Arc<dyn CredentialsProvider>,
+        state: Entity<KiroState>,
+        cx: &AsyncApp,
+    ) -> Option<(BuilderIdToken, String)> {
+        let (token, registration, region) = cx.update(|cx| {
+            let s = state.read(cx);
+            (s.token.clone(), s.registration.clone(), s.region.clone())
+        }).ok()?;
+
+        let token = token?;
+        let registration = registration?;
+
+        if !token.expires_soon(Duration::minutes(5)) {
+            return Some((token, region));
+        }
+
+        log::info!("Token expires soon, refreshing...");
+
+        match token.refresh(&http_client, &registration).await {
+            Ok(new_token) => {
+                let storage = TokenStorage::new(credentials_provider);
+                if let Err(e) = storage.save_token(&new_token, cx).await {
+                    log::error!("Failed to save refreshed token: {:?}", e);
+                }
+
+                cx.update(|cx| {
+                    state.update(cx, |state, cx| {
+                        state.set_token(Some(new_token.clone()));
+                        cx.notify();
+                    });
+                }).ok();
+
+                log::info!("Token refreshed successfully");
+                Some((new_token, region))
+            }
+            Err(e) => {
+                log::error!("Token refresh failed: {:?}", e);
+                if !token.is_expired() {
+                    Some((token, region))
+                } else {
+                    cx.update(|cx| {
+                        state.update(cx, |state, cx| {
+                            state.set_token(None);
+                            state.set_auth_status(AuthStatus::SignedOut);
+                            cx.notify();
+                        });
+                    }).ok();
+                    None
+                }
             }
         }
     }

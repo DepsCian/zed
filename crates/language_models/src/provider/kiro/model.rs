@@ -1,7 +1,8 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+use credentials_provider::CredentialsProvider;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::{FutureExt, StreamExt, TryFutureExt};
+use futures::{FutureExt, StreamExt};
 use gpui::{App, AppContext, AsyncApp, Entity};
 use http_client::HttpClient;
 use kiro::KiroClient;
@@ -13,6 +14,7 @@ use language_model::{
 use std::sync::Arc;
 
 use super::config::{PROVIDER_ID, PROVIDER_NAME};
+use super::provider::KiroLanguageModelProvider;
 use super::state::KiroState;
 use super::stream::{
     build_send_message_request, map_chat_events_to_completion_events,
@@ -25,6 +27,7 @@ pub struct KiroModel {
     pub(crate) max_tokens: u64,
     pub(crate) state: Entity<KiroState>,
     pub(crate) http_client: Arc<dyn HttpClient>,
+    pub(crate) credentials_provider: Arc<dyn CredentialsProvider>,
     pub(crate) request_limiter: RateLimiter,
 }
 
@@ -119,41 +122,40 @@ impl LanguageModel for KiroModel {
     > {
         let state = self.state.clone();
         let http_client = self.http_client.clone();
+        let credentials_provider = self.credentials_provider.clone();
         let request_limiter = self.request_limiter.clone();
         let model_id = self.model_id.clone();
 
-        let state_result = state.read_with(cx, |state, _cx| {
-            match &state.token {
-                Some(token) if !token.is_expired() => Ok((token.clone(), state.region.clone())),
-                Some(_) => Err(LanguageModelCompletionError::AuthenticationError {
-                    provider: PROVIDER_NAME,
-                    message: "Token expired".to_string(),
-                }),
-                None => Err(LanguageModelCompletionError::NoApiKey {
-                    provider: PROVIDER_NAME,
-                }),
+        cx.spawn(async move |cx| {
+            let token_result = KiroLanguageModelProvider::ensure_valid_token(
+                http_client.clone(),
+                credentials_provider,
+                state,
+                &cx,
+            ).await;
+
+            let (token, region) = match token_result {
+                Some(data) => data,
+                None => {
+                    return Err(LanguageModelCompletionError::AuthenticationError {
+                        provider: PROVIDER_NAME,
+                        message: "Token expired and refresh failed".to_string(),
+                    });
+                }
+            };
+
+            let kiro_request = build_send_message_request(&request, &model_id);
+
+            let stream_result = request_limiter.stream(async move {
+                let client = KiroClient::new(http_client, token, region);
+                let stream = client.send_message(kiro_request).await.map_err(map_kiro_error_to_completion_error)?;
+                Ok(map_chat_events_to_completion_events(stream))
+            }).await;
+
+            match stream_result {
+                Ok(stream) => Ok(stream.boxed()),
+                Err(e) => Err(e),
             }
-        });
-
-        let (token, region) = match state_result {
-            Ok(Ok(data)) => data,
-            Ok(Err(e)) => return futures::future::ready(Err(e)).boxed(),
-            Err(_) => {
-                return futures::future::ready(Err(LanguageModelCompletionError::Other(anyhow!(
-                    "App state dropped"
-                ))))
-                .boxed()
-            }
-        };
-
-        let kiro_request = build_send_message_request(&request, &model_id);
-
-        let future = request_limiter.stream(async move {
-            let client = KiroClient::new(http_client, token, region);
-            let stream = client.send_message(kiro_request).await.map_err(map_kiro_error_to_completion_error)?;
-            Ok(map_chat_events_to_completion_events(stream))
-        });
-
-        future.map_ok(|f| f.boxed()).boxed()
+        }).boxed()
     }
 }
