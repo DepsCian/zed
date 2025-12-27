@@ -8992,6 +8992,7 @@ dependencies = [
  "gpui",
  "gpui_tokio",
  "http_client",
+ "kiro",
  "language",
  "language_model",
  "lmstudio",
