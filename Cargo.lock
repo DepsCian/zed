@@ -8796,11 +8796,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "credentials_provider",
  "futures 0.3.31",
+ "gpui",
  "http_client",
  "schemars",
  "serde",
  "serde_json",
+ "smol",
  "thiserror 2.0.17",
  "uuid",
 ]
