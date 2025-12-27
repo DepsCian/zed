@@ -20,17 +20,14 @@ use language_model::{
 use settings::SettingsStore;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use ui::{ButtonLike, ConfiguredApiCard, prelude::*};
-
-static MESSAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const PROVIDER_ID: LanguageModelProviderId = LanguageModelProviderId::new("kiro");
 const PROVIDER_NAME: LanguageModelProviderName = LanguageModelProviderName::new("Kiro AI");
 
 const DEFAULT_REGION: &str = "us-east-1";
-const SCOPES: &[&str] = &["codewhisperer:completions", "codewhisperer:conversations"];
+const SCOPES: &[&str] = &["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations"];
 
 const AWS_BUILDER_ID_URL: &str = "https://view.awsapps.com/start";
 const AVAILABLE_REGIONS: &[(&str, &str)] = &[
@@ -804,15 +801,8 @@ fn build_send_message_request(request: &LanguageModelRequest) -> SendMessageRequ
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let message_id = format!("msg-{}", MESSAGE_ID_COUNTER.fetch_add(1, Ordering::SeqCst));
-
-    SendMessageRequest {
-        conversation_id: request.thread_id.clone(),
-        message_id,
-        content,
-        user_context: UserContext::for_zed(),
-        profile_arn: None,
-    }
+    let user_context = UserContext::for_zed();
+    SendMessageRequest::new(content, request.thread_id.clone(), &user_context)
 }
 
 fn map_api_error_to_completion_error(error: ApiError) -> LanguageModelCompletionError {
