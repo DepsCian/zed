@@ -1,8 +1,8 @@
 pub fn get_endpoint(region: &str) -> &'static str {
     match region {
-        "us-east-1" => "https://codewhisperer.us-east-1.amazonaws.com",
-        "eu-central-1" => "https://q.eu-central-1.amazonaws.com/eu-central-1",
-        _ => "https://codewhisperer.us-east-1.amazonaws.com",
+        "us-east-1" => "https://q.us-east-1.amazonaws.com",
+        "eu-central-1" => "https://q.eu-central-1.amazonaws.com",
+        _ => "https://q.us-east-1.amazonaws.com",
     }
 }
 
