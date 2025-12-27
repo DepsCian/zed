@@ -3,23 +3,28 @@ use chrono::{DateTime, Utc};
 use credentials_provider::CredentialsProvider;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::FutureExt;
+use futures::{FutureExt, Stream, StreamExt, TryFutureExt};
 use gpui::{AnyView, App, AsyncApp, Context, Entity, Subscription, Task};
 use http_client::HttpClient;
 use kiro::{
-    BuilderIdToken, DeviceFlowClient, DeviceRegistration,
-    TokenStorage,
+    ApiError, BuilderIdToken, ChatEvent, DeviceFlowClient, DeviceRegistration, KiroClient,
+    KiroError, SendMessageRequest, TokenStorage, UserContext,
 };
 use language_model::{
     AuthenticateError, ConfigurationViewTargetAgent, IconOrSvg, LanguageModel,
     LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelId, LanguageModelName,
     LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
     LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice, RateLimiter,
+    StopReason,
 };
 use settings::SettingsStore;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use ui::prelude::*;
+
+static MESSAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const PROVIDER_ID: LanguageModelProviderId = LanguageModelProviderId::new("kiro");
 const PROVIDER_NAME: LanguageModelProviderName = LanguageModelProviderName::new("Kiro AI");
@@ -395,8 +400,8 @@ impl LanguageModel for KiroModel {
 
     fn stream_completion(
         &self,
-        _request: LanguageModelRequest,
-        _cx: &AsyncApp,
+        request: LanguageModelRequest,
+        cx: &AsyncApp,
     ) -> BoxFuture<
         'static,
         Result<
@@ -404,11 +409,136 @@ impl LanguageModel for KiroModel {
             LanguageModelCompletionError,
         >,
     > {
-        async move {
+        let state = self.state.clone();
+        let http_client = self.http_client.clone();
+        let request_limiter = self.request_limiter.clone();
+
+        let state_result = state.read_with(cx, |state, _cx| {
+            match &state.token {
+                Some(token) if !token.is_expired() => Ok((token.clone(), state.region.clone())),
+                Some(_) => Err(LanguageModelCompletionError::AuthenticationError {
+                    provider: PROVIDER_NAME,
+                    message: "Token expired".to_string(),
+                }),
+                None => Err(LanguageModelCompletionError::NoApiKey {
+                    provider: PROVIDER_NAME,
+                }),
+            }
+        });
+
+        let (token, region) = match state_result {
+            Ok(Ok(data)) => data,
+            Ok(Err(e)) => return futures::future::ready(Err(e)).boxed(),
+            Err(_) => {
+                return futures::future::ready(Err(LanguageModelCompletionError::Other(anyhow!(
+                    "App state dropped"
+                ))))
+                .boxed()
+            }
+        };
+
+        let kiro_request = build_send_message_request(&request);
+
+        let future = request_limiter.stream(async move {
+            let client = KiroClient::new(http_client, token, region);
+            let stream = client.send_message(kiro_request).await.map_err(map_kiro_error)?;
+            Ok(map_chat_events_to_completion_events(stream))
+        });
+
+        future.map_ok(|f| f.boxed()).boxed()
+    }
+}
+
+fn build_send_message_request(request: &LanguageModelRequest) -> SendMessageRequest {
+    let content = request
+        .messages
+        .iter()
+        .map(|msg| {
+            let role_prefix = match msg.role {
+                language_model::Role::User => "",
+                language_model::Role::Assistant => "Assistant: ",
+                language_model::Role::System => "System: ",
+            };
+            format!("{}{}", role_prefix, msg.string_contents())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let message_id = format!("msg-{}", MESSAGE_ID_COUNTER.fetch_add(1, Ordering::SeqCst));
+
+    SendMessageRequest {
+        conversation_id: request.thread_id.clone(),
+        message_id,
+        content,
+        user_context: UserContext::for_zed(),
+        profile_arn: None,
+    }
+}
+
+fn map_kiro_error(error: KiroError) -> LanguageModelCompletionError {
+    match error {
+        KiroError::Api(ApiError::Throttling { retry_after, .. }) => {
+            LanguageModelCompletionError::RateLimitExceeded {
+                provider: PROVIDER_NAME,
+                retry_after: retry_after.map(Duration::from_secs),
+            }
+        }
+        KiroError::Api(ApiError::Validation { message }) => {
+            LanguageModelCompletionError::BadRequestFormat {
+                provider: PROVIDER_NAME,
+                message,
+            }
+        }
+        KiroError::Api(ApiError::AccessDenied { message }) => {
+            LanguageModelCompletionError::AuthenticationError {
+                provider: PROVIDER_NAME,
+                message,
+            }
+        }
+        KiroError::Api(ApiError::InternalServerError) => {
+            LanguageModelCompletionError::ApiInternalServerError {
+                provider: PROVIDER_NAME,
+                message: "Internal server error".to_string(),
+            }
+        }
+        KiroError::Api(ApiError::ServiceUnavailable) => {
+            LanguageModelCompletionError::ServerOverloaded {
+                provider: PROVIDER_NAME,
+                retry_after: None,
+            }
+        }
+        KiroError::Auth(auth_error) => LanguageModelCompletionError::AuthenticationError {
+            provider: PROVIDER_NAME,
+            message: auth_error.to_string(),
+        },
+        KiroError::Network(msg) => LanguageModelCompletionError::HttpSend {
+            provider: PROVIDER_NAME,
+            error: anyhow!(msg),
+        },
+        KiroError::Io(e) => LanguageModelCompletionError::HttpSend {
+            provider: PROVIDER_NAME,
+            error: anyhow!(e),
+        },
+        KiroError::Other(e) => LanguageModelCompletionError::Other(e),
+    }
+}
+
+fn map_chat_events_to_completion_events(
+    stream: Pin<Box<dyn Stream<Item = Result<ChatEvent, KiroError>> + Send>>,
+) -> impl Stream<Item = Result<LanguageModelCompletionEvent, LanguageModelCompletionError>> {
+    stream.map(|result| match result {
+        Ok(ChatEvent::TextDelta { content }) => {
+            Ok(LanguageModelCompletionEvent::Text(content))
+        }
+        Ok(ChatEvent::Metadata { .. }) => Ok(LanguageModelCompletionEvent::Started),
+        Ok(ChatEvent::End) => Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)),
+        Ok(ChatEvent::Error { message, code }) => {
             Err(LanguageModelCompletionError::Other(anyhow!(
-                "Kiro stream_completion not yet implemented"
+                "Kiro API error: {} (code: {:?})",
+                message,
+                code
             )))
         }
-        .boxed()
-    }
+        Err(e) => Err(map_kiro_error(e)),
+    })
 }
