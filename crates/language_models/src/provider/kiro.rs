@@ -4,7 +4,7 @@ use credentials_provider::CredentialsProvider;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt};
-use gpui::{AnyView, App, AsyncApp, Context, Entity, Subscription, Task};
+use gpui::{AnyView, App, AsyncApp, ClipboardItem, Context, Entity, Subscription, Task, Timer};
 use http_client::HttpClient;
 use kiro::{
     ApiError, BuilderIdToken, ChatEvent, DeviceFlowClient, DeviceRegistration, KiroClient,
@@ -22,7 +22,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use ui::prelude::*;
+use ui::{ButtonLike, ConfiguredApiCard, prelude::*};
 
 static MESSAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -31,6 +31,12 @@ const PROVIDER_NAME: LanguageModelProviderName = LanguageModelProviderName::new(
 
 const DEFAULT_REGION: &str = "us-east-1";
 const SCOPES: &[&str] = &["codewhisperer:completions", "codewhisperer:conversations"];
+
+const AWS_BUILDER_ID_URL: &str = "https://view.awsapps.com/start";
+const AVAILABLE_REGIONS: &[(&str, &str)] = &[
+    ("us-east-1", "US East (N. Virginia)"),
+    ("eu-central-1", "EU (Frankfurt)"),
+];
 
 #[derive(Debug, Clone)]
 pub struct DeviceFlowPrompt {
@@ -275,7 +281,9 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
         cx: &mut App,
     ) -> AnyView {
         let state = self.state.clone();
-        cx.new(|_cx| KiroConfigurationView { state }).into()
+        let http_client = self.http_client.clone();
+        let credentials_provider = self.credentials_provider.clone();
+        cx.new(|cx| KiroConfigurationView::new(state, http_client, credentials_provider, cx)).into()
     }
 
     fn reset_credentials(&self, cx: &mut App) -> Task<Result<()>> {
@@ -304,28 +312,352 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
 
 struct KiroConfigurationView {
     state: Entity<KiroState>,
+    http_client: Arc<dyn HttpClient>,
+    credentials_provider: Arc<dyn CredentialsProvider>,
+    selected_region: String,
+    countdown_task: Option<Task<()>>,
+    _subscription: Subscription,
+}
+
+impl KiroConfigurationView {
+    fn new(
+        state: Entity<KiroState>,
+        http_client: Arc<dyn HttpClient>,
+        credentials_provider: Arc<dyn CredentialsProvider>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let selected_region = state.read(cx).region.clone();
+        let subscription = cx.observe(&state, |_, _, cx| cx.notify());
+
+        Self {
+            state,
+            http_client,
+            credentials_provider,
+            selected_region,
+            countdown_task: None,
+            _subscription: subscription,
+        }
+    }
+
+    fn start_countdown(&mut self, cx: &mut Context<Self>) {
+        self.countdown_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_secs(1)).await;
+                let should_continue = this
+                    .update(cx, |_this, cx| {
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn stop_countdown(&mut self) {
+        self.countdown_task = None;
+    }
+
+    fn sign_in(&mut self, cx: &mut Context<Self>) {
+        let http_client = self.http_client.clone();
+        let credentials_provider = self.credentials_provider.clone();
+        let state = self.state.clone();
+        let region = self.selected_region.clone();
+
+        self.start_countdown(cx);
+
+        cx.spawn(async move |_this, cx| {
+            let storage = TokenStorage::new(credentials_provider);
+            let device_flow = DeviceFlowClient::new(http_client.clone(), &region);
+
+            let registration = match storage.load_registration(&cx).await? {
+                Some(reg) => reg,
+                None => {
+                    let reg = device_flow.register_client(SCOPES).await?;
+                    storage.save_registration(&reg, &cx).await?;
+                    reg
+                }
+            };
+
+            let auth_response = device_flow.start_device_authorization(&registration).await?;
+
+            let prompt = DeviceFlowPrompt {
+                user_code: auth_response.user_code.clone(),
+                verification_uri: auth_response.verification_uri.clone(),
+                expires_at: Utc::now() + chrono::Duration::seconds(auth_response.expires_in as i64),
+            };
+
+            cx.update(|cx| {
+                state.update(cx, |state, cx| {
+                    state.set_auth_status(AuthStatus::SigningIn { prompt });
+                    cx.notify();
+                });
+            })?;
+
+            let interval = Duration::from_secs(auth_response.interval);
+            let expires_at = Utc::now() + chrono::Duration::seconds(auth_response.expires_in as i64);
+
+            let token_result = device_flow
+                .poll_for_token(&registration, &auth_response.device_code, interval, expires_at)
+                .await;
+
+            match token_result {
+                Ok(token) => {
+                    storage.save_token(&token, &cx).await?;
+
+                    cx.update(|cx| {
+                        state.update(cx, |state, cx| {
+                            state.set_token(Some(token));
+                            cx.notify();
+                        });
+                    })?;
+                }
+                Err(poll_error) => {
+                    let error_msg = poll_error.to_string();
+
+                    cx.update(|cx| {
+                        state.update(cx, |state, cx| {
+                            state.set_auth_status(AuthStatus::Error(error_msg));
+                            cx.notify();
+                        });
+                    })?;
+                }
+            }
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn sign_out(&mut self, cx: &mut Context<Self>) {
+        let credentials_provider = self.credentials_provider.clone();
+        let state = self.state.clone();
+
+        self.stop_countdown();
+
+        cx.spawn(async move |_this, cx| {
+            let storage = TokenStorage::new(credentials_provider);
+
+            storage.delete_token(&cx).await?;
+            storage.delete_registration(&cx).await?;
+
+            cx.update(|cx| {
+                state.update(cx, |state, cx| {
+                    state.set_token(None);
+                    state.set_registration(None);
+                    state.set_auth_status(AuthStatus::SignedOut);
+                    cx.notify();
+                });
+            })?;
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        self.stop_countdown();
+        self.state.update(cx, |state, cx| {
+            state.set_auth_status(AuthStatus::SignedOut);
+            cx.notify();
+        });
+    }
+
+    fn set_region(&mut self, region: String, cx: &mut Context<Self>) {
+        self.selected_region = region.clone();
+        self.state.update(cx, |state, cx| {
+            state.region = region;
+            cx.notify();
+        });
+    }
+
+    fn render_instructions(&self) -> impl IntoElement {
+        v_flex()
+            .gap_2()
+            .child(Label::new(
+                "Kiro AI provides AI-powered coding assistance through AWS Builder ID authentication.",
+            ))
+            .child(Label::new(
+                "Sign in with your AWS Builder ID to access Kiro's AI features.",
+            ))
+    }
+
+    fn render_region_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current_region = self.selected_region.clone();
+
+        v_flex()
+            .gap_1()
+            .child(Label::new("Region").size(LabelSize::Small).color(Color::Muted))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .children(AVAILABLE_REGIONS.iter().map(|(region, label)| {
+                        let is_selected = current_region == *region;
+                        let region_str = region.to_string();
+
+                        Button::new(SharedString::from(*region), *label)
+                            .style(if is_selected {
+                                ButtonStyle::Filled
+                            } else {
+                                ButtonStyle::Outlined
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_region(region_str.clone(), cx);
+                            }))
+                    })),
+            )
+    }
+
+    fn render_device_code_ui(&self, prompt: &DeviceFlowPrompt, cx: &mut Context<Self>) -> impl IntoElement {
+        let user_code = prompt.user_code.clone();
+        let verification_uri = prompt.verification_uri.clone();
+        let expires_at = prompt.expires_at;
+
+        let remaining_seconds = (expires_at - Utc::now()).num_seconds().max(0);
+        let minutes = remaining_seconds / 60;
+        let seconds = remaining_seconds % 60;
+
+        let copied = cx
+            .read_from_clipboard()
+            .map(|item| item.text().as_ref() == Some(&user_code))
+            .unwrap_or(false);
+
+        v_flex()
+            .gap_3()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(Label::new("Enter this code on AWS:").color(Color::Muted))
+                    .child(
+                        ButtonLike::new("copy-code")
+                            .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .justify_between()
+                                    .child(
+                                        Label::new(user_code.clone())
+                                            .size(LabelSize::Large)
+                                            .weight(gpui::FontWeight::BOLD),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_1()
+                                            .child(Icon::new(IconName::Copy).size(IconSize::Small))
+                                            .child(Label::new(if copied { "Copied!" } else { "Copy" })),
+                                    ),
+                            )
+                            .on_click({
+                                let code = user_code.clone();
+                                move |_, _window: &mut Window, cx: &mut App| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                                }
+                            }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("open-aws", "Open AWS")
+                            .style(ButtonStyle::Outlined)
+                            .icon(IconName::ArrowUpRight)
+                            .icon_size(IconSize::Small)
+                            .icon_position(IconPosition::End)
+                            .on_click({
+                                let uri = verification_uri.clone();
+                                move |_, _, cx| cx.open_url(&uri)
+                            }),
+                    )
+                    .child(
+                        Button::new("cancel-sign-in", "Cancel")
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cancel_sign_in(cx);
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Icon::new(IconName::CountdownTimer).size(IconSize::Small).color(Color::Muted))
+                    .child(
+                        Label::new(format!("Expires in {}:{:02}", minutes, seconds))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+    }
+
+    fn render_sign_in_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Button::new("sign-in", "Sign in with AWS Builder ID")
+            .full_width()
+            .style(ButtonStyle::Outlined)
+            .icon(IconName::Person)
+            .icon_position(IconPosition::Start)
+            .icon_size(IconSize::Small)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.sign_in(cx);
+            }))
+    }
+
+    fn render_error(&self, message: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Icon::new(IconName::Warning).color(Color::Error))
+                    .child(Label::new(format!("Error: {}", message)).color(Color::Error)),
+            )
+            .child(self.render_sign_in_button(cx))
+    }
 }
 
 impl Render for KiroConfigurationView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let auth_status = self.state.read(cx).auth_status.clone();
+        let is_authenticated = self.state.read(cx).is_authenticated();
 
         v_flex()
-            .gap_2()
-            .child(Label::new("Kiro AI").size(LabelSize::Large))
+            .gap_3()
+            .child(self.render_instructions())
+            .child(self.render_region_selector(cx))
             .child(match auth_status {
                 AuthStatus::SignedOut => {
-                    Label::new("Not signed in. Click authenticate to sign in with AWS Builder ID.")
+                    self.render_sign_in_button(cx).into_any_element()
                 }
                 AuthStatus::SigningIn { prompt } => {
-                    Label::new(format!(
-                        "Enter code {} at {}",
-                        prompt.user_code, prompt.verification_uri
-                    ))
+                    self.render_device_code_ui(&prompt, cx).into_any_element()
                 }
-                AuthStatus::Authenticated => Label::new("Authenticated with AWS Builder ID"),
-                AuthStatus::Error(msg) => Label::new(format!("Error: {}", msg)),
+                AuthStatus::Authenticated => {
+                    if is_authenticated {
+                        ConfiguredApiCard::new("Authenticated with AWS Builder ID")
+                            .button_label("Sign Out")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sign_out(cx);
+                            }))
+                            .into_any_element()
+                    } else {
+                        self.render_sign_in_button(cx).into_any_element()
+                    }
+                }
+                AuthStatus::Error(msg) => {
+                    self.render_error(&msg, cx).into_any_element()
+                }
             })
+            .child(
+                Button::new("aws-builder-id-info", "Learn about AWS Builder ID")
+                    .style(ButtonStyle::Subtle)
+                    .icon(IconName::ArrowUpRight)
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
+                    .on_click(move |_, _, cx| cx.open_url(AWS_BUILDER_ID_URL)),
+            )
     }
 }
 
