@@ -441,7 +441,7 @@ impl LanguageModel for KiroModel {
 
         let future = request_limiter.stream(async move {
             let client = KiroClient::new(http_client, token, region);
-            let stream = client.send_message(kiro_request).await.map_err(map_kiro_error)?;
+            let stream = client.send_message(kiro_request).await.map_err(map_kiro_error_to_completion_error)?;
             Ok(map_chat_events_to_completion_events(stream))
         });
 
@@ -475,38 +475,34 @@ fn build_send_message_request(request: &LanguageModelRequest) -> SendMessageRequ
     }
 }
 
-fn map_kiro_error(error: KiroError) -> LanguageModelCompletionError {
+fn map_api_error_to_completion_error(error: ApiError) -> LanguageModelCompletionError {
     match error {
-        KiroError::Api(ApiError::Throttling { retry_after, .. }) => {
-            LanguageModelCompletionError::RateLimitExceeded {
-                provider: PROVIDER_NAME,
-                retry_after: retry_after.map(Duration::from_secs),
-            }
-        }
-        KiroError::Api(ApiError::Validation { message }) => {
-            LanguageModelCompletionError::BadRequestFormat {
-                provider: PROVIDER_NAME,
-                message,
-            }
-        }
-        KiroError::Api(ApiError::AccessDenied { message }) => {
-            LanguageModelCompletionError::AuthenticationError {
-                provider: PROVIDER_NAME,
-                message,
-            }
-        }
-        KiroError::Api(ApiError::InternalServerError) => {
-            LanguageModelCompletionError::ApiInternalServerError {
-                provider: PROVIDER_NAME,
-                message: "Internal server error".to_string(),
-            }
-        }
-        KiroError::Api(ApiError::ServiceUnavailable) => {
-            LanguageModelCompletionError::ServerOverloaded {
-                provider: PROVIDER_NAME,
-                retry_after: None,
-            }
-        }
+        ApiError::Throttling { message: _, retry_after } => LanguageModelCompletionError::RateLimitExceeded {
+            provider: PROVIDER_NAME,
+            retry_after: retry_after.map(Duration::from_secs),
+        },
+        ApiError::Validation { message } => LanguageModelCompletionError::BadRequestFormat {
+            provider: PROVIDER_NAME,
+            message,
+        },
+        ApiError::AccessDenied { message } => LanguageModelCompletionError::AuthenticationError {
+            provider: PROVIDER_NAME,
+            message,
+        },
+        ApiError::InternalServerError => LanguageModelCompletionError::ApiInternalServerError {
+            provider: PROVIDER_NAME,
+            message: "Internal server error".to_string(),
+        },
+        ApiError::ServiceUnavailable => LanguageModelCompletionError::ServerOverloaded {
+            provider: PROVIDER_NAME,
+            retry_after: None,
+        },
+    }
+}
+
+fn map_kiro_error_to_completion_error(error: KiroError) -> LanguageModelCompletionError {
+    match error {
+        KiroError::Api(api_error) => map_api_error_to_completion_error(api_error),
         KiroError::Auth(auth_error) => LanguageModelCompletionError::AuthenticationError {
             provider: PROVIDER_NAME,
             message: auth_error.to_string(),
@@ -539,6 +535,6 @@ fn map_chat_events_to_completion_events(
                 code
             )))
         }
-        Err(e) => Err(map_kiro_error(e)),
+        Err(e) => Err(map_kiro_error_to_completion_error(e)),
     })
 }
