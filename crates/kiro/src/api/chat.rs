@@ -7,18 +7,116 @@ use futures::{AsyncReadExt, Stream};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
-const SEND_MESSAGE_TARGET: &str = "QDeveloperSendMessage";
+const SEND_MESSAGE_TARGET: &str = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageRequest {
+    pub conversation_state: ConversationState,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationState {
+    pub conversation_id: String,
+    pub history: Vec<HistoryEntry>,
+    pub current_message: CurrentMessage,
+    pub chat_trigger_type: String,
+    pub agent_continuation_id: String,
+    pub agent_task_type: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub conversation_id: Option<String>,
-    pub message_id: String,
+    pub user_input_message: Option<UserInputMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_response_message: Option<AssistantResponseMessage>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentMessage {
+    pub user_input_message: UserInputMessage,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputMessage {
     pub content: String,
-    pub user_context: UserContext,
+    pub user_input_message_context: UserInputMessageContext,
+    pub origin: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_arn: Option<String>,
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputMessageContext {
+    pub env_state: EnvState,
+    pub tools: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvState {
+    pub operating_system: String,
+    pub current_working_directory: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantResponseMessage {
+    pub content: String,
+}
+
+impl SendMessageRequest {
+    pub fn new(content: String, conversation_id: Option<String>, user_context: &UserContext) -> Self {
+        let os = match user_context.operating_system {
+            crate::types::user_context::OperatingSystem::Linux => "linux",
+            crate::types::user_context::OperatingSystem::Windows => "windows",
+            crate::types::user_context::OperatingSystem::Macos => "macos",
+        };
+
+        let conv_id = conversation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        Self {
+            conversation_state: ConversationState {
+                conversation_id: conv_id,
+                history: Vec::new(),
+                current_message: CurrentMessage {
+                    user_input_message: UserInputMessage {
+                        content,
+                        user_input_message_context: UserInputMessageContext {
+                            env_state: EnvState {
+                                operating_system: os.to_string(),
+                                current_working_directory: std::env::current_dir()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|_| "/".to_string()),
+                            },
+                            tools: Vec::new(),
+                        },
+                        origin: "KIRO_CLI".to_string(),
+                        model_id: None,
+                    },
+                },
+                chat_trigger_type: "MANUAL".to_string(),
+                agent_continuation_id: uuid::Uuid::new_v4().to_string(),
+                agent_task_type: "vibe".to_string(),
+            },
+        }
+    }
+
+    pub fn with_history(mut self, history: Vec<HistoryEntry>) -> Self {
+        self.conversation_state.history = history;
+        self
+    }
+
+    pub fn with_model(mut self, model_id: String) -> Self {
+        self.conversation_state.current_message.user_input_message.model_id = Some(model_id);
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -31,25 +129,25 @@ pub enum ChatEvent {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AssistantResponseEvent {
+struct AssistantResponseEventPayload {
     #[serde(default)]
-    assistant_response_event: Option<TextDeltaPayload>,
-    #[serde(default)]
-    message_metadata_event: Option<MessageMetadataPayload>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TextDeltaPayload {
-    content: String,
+    content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MessageMetadataPayload {
-    conversation_id: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
     #[serde(default)]
     utterance_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InitialResponsePayload {
+    #[serde(default)]
+    conversation_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +193,7 @@ struct ChatEventStream<B> {
     parser: AwsEventStreamParser,
     pending_events: Vec<Result<ChatEvent, KiroError>>,
     finished: bool,
+    conversation_id: Option<String>,
 }
 
 impl<B> ChatEventStream<B> {
@@ -104,6 +203,7 @@ impl<B> ChatEventStream<B> {
             parser: AwsEventStreamParser::new(),
             pending_events: Vec::new(),
             finished: false,
+            conversation_id: None,
         }
     }
 }
@@ -179,40 +279,47 @@ impl<B: futures::AsyncRead + Unpin + Send> Stream for ChatEventStream<B> {
                             } else if aws_event.is_event() {
                                 if let Some(event_type) = &aws_event.event_type {
                                     match event_type.as_str() {
+                                        "initial-response" => {
+                                            if let Ok(payload) =
+                                                aws_event.parse_json::<InitialResponsePayload>()
+                                            {
+                                                if let Some(conv_id) = payload.conversation_id {
+                                                    if !conv_id.is_empty() {
+                                                        this.conversation_id = Some(conv_id);
+                                                    }
+                                                }
+                                            }
+                                        }
                                         "assistantResponseEvent" => {
                                             if let Ok(payload) =
-                                                aws_event.parse_json::<AssistantResponseEvent>()
+                                                aws_event.parse_json::<AssistantResponseEventPayload>()
                                             {
-                                                if let Some(text_delta) =
-                                                    payload.assistant_response_event
-                                                {
+                                                if let Some(content) = payload.content {
                                                     this.pending_events.push(Ok(
-                                                        ChatEvent::TextDelta {
-                                                            content: text_delta.content,
-                                                        },
+                                                        ChatEvent::TextDelta { content },
                                                     ));
                                                 }
                                             }
                                         }
                                         "messageMetadataEvent" => {
                                             if let Ok(payload) =
-                                                aws_event.parse_json::<AssistantResponseEvent>()
+                                                aws_event.parse_json::<MessageMetadataPayload>()
                                             {
-                                                if let Some(metadata) =
-                                                    payload.message_metadata_event
-                                                {
-                                                    this.pending_events.push(Ok(
-                                                        ChatEvent::Metadata {
-                                                            conversation_id: metadata
-                                                                .conversation_id,
-                                                            message_id: metadata
-                                                                .utterance_id
-                                                                .unwrap_or_default(),
-                                                        },
-                                                    ));
-                                                }
+                                                let conv_id = payload
+                                                    .conversation_id
+                                                    .or_else(|| this.conversation_id.clone())
+                                                    .unwrap_or_default();
+                                                this.pending_events.push(Ok(
+                                                    ChatEvent::Metadata {
+                                                        conversation_id: conv_id,
+                                                        message_id: payload
+                                                            .utterance_id
+                                                            .unwrap_or_default(),
+                                                    },
+                                                ));
                                             }
                                         }
+                                        "meteringEvent" => {}
                                         _ => {}
                                     }
                                 }
