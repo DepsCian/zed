@@ -8,6 +8,7 @@ pub struct KiroModelDefinition {
     pub id: String,
     pub name: String,
     pub rate_multiplier: f64,
+    pub max_tokens: u64,
 }
 
 impl From<ModelInfo> for KiroModelDefinition {
@@ -16,6 +17,7 @@ impl From<ModelInfo> for KiroModelDefinition {
             id: info.model_id,
             name: info.model_name,
             rate_multiplier: info.rate_multiplier,
+            max_tokens: 200000,
         }
     }
 }

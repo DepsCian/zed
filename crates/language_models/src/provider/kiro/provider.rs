@@ -113,6 +113,7 @@ impl KiroLanguageModelProvider {
         Arc::new(KiroModel {
             model_id: model_def.id.clone(),
             model_name: model_def.name.clone(),
+            max_tokens: model_def.max_tokens,
             state: self.state.clone(),
             http_client: self.http_client.clone(),
             request_limiter: RateLimiter::new(4),
@@ -123,6 +124,7 @@ impl KiroLanguageModelProvider {
         Arc::new(KiroModel {
             model_id: "auto".to_string(),
             model_name: "Auto".to_string(),
+            max_tokens: 200000,
             state: self.state.clone(),
             http_client: self.http_client.clone(),
             request_limiter: RateLimiter::new(4),

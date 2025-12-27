@@ -6,19 +6,23 @@ use gpui::{App, AppContext, AsyncApp, Entity};
 use http_client::HttpClient;
 use kiro::KiroClient;
 use language_model::{
-    LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent,
-    LanguageModelId, LanguageModelName, LanguageModelProviderId, LanguageModelProviderName,
-    LanguageModelRequest, LanguageModelToolChoice, RateLimiter,
+    LanguageModel, LanguageModelCacheConfiguration, LanguageModelCompletionError,
+    LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProviderId,
+    LanguageModelProviderName, LanguageModelRequest, LanguageModelToolChoice, RateLimiter,
 };
 use std::sync::Arc;
 
 use super::config::{PROVIDER_ID, PROVIDER_NAME};
 use super::state::KiroState;
-use super::stream::{build_send_message_request, map_kiro_error_to_completion_error, map_chat_events_to_completion_events};
+use super::stream::{
+    build_send_message_request, map_chat_events_to_completion_events,
+    map_kiro_error_to_completion_error,
+};
 
 pub struct KiroModel {
     pub(crate) model_id: String,
     pub(crate) model_name: String,
+    pub(crate) max_tokens: u64,
     pub(crate) state: Entity<KiroState>,
     pub(crate) http_client: Arc<dyn HttpClient>,
     pub(crate) request_limiter: RateLimiter,
@@ -42,15 +46,22 @@ impl LanguageModel for KiroModel {
     }
 
     fn supports_tools(&self) -> bool {
-        false
+        true
     }
 
     fn supports_images(&self) -> bool {
-        false
+        true
     }
 
-    fn supports_tool_choice(&self, _choice: LanguageModelToolChoice) -> bool {
-        false
+    fn supports_streaming_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_tool_choice(&self, choice: LanguageModelToolChoice) -> bool {
+        match choice {
+            LanguageModelToolChoice::Auto | LanguageModelToolChoice::None => true,
+            LanguageModelToolChoice::Any => false,
+        }
     }
 
     fn telemetry_id(&self) -> String {
@@ -58,7 +69,15 @@ impl LanguageModel for KiroModel {
     }
 
     fn max_token_count(&self) -> u64 {
-        128000
+        self.max_tokens
+    }
+
+    fn max_output_tokens(&self) -> Option<u64> {
+        Some(8192)
+    }
+
+    fn cache_configuration(&self) -> Option<LanguageModelCacheConfiguration> {
+        None
     }
 
     fn count_tokens(
