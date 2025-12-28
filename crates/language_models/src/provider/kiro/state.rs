@@ -11,13 +11,18 @@ pub struct KiroModelDefinition {
     pub max_tokens: u64,
 }
 
+const DEFAULT_MAX_TOKENS: u64 = 200000;
+
 impl From<ModelInfo> for KiroModelDefinition {
     fn from(info: ModelInfo) -> Self {
         Self {
             id: info.model_id,
             name: info.model_name,
             rate_multiplier: info.rate_multiplier,
-            max_tokens: 200000,
+            max_tokens: info
+                .token_limits
+                .max_input_tokens
+                .unwrap_or(DEFAULT_MAX_TOKENS),
         }
     }
 }
@@ -58,7 +63,11 @@ impl KiroState {
         self.auth_status = status;
     }
 
-    pub fn set_available_models(&mut self, models: Vec<KiroModelDefinition>, default_id: Option<String>) {
+    pub fn set_available_models(
+        &mut self,
+        models: Vec<KiroModelDefinition>,
+        default_id: Option<String>,
+    ) {
         self.available_models = models;
         self.default_model_id = default_id;
         self.models_loaded = true;
