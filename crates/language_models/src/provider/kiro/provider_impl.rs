@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use chrono::Utc;
 use gpui::{AnyView, App, Task};
 use kiro::{DeviceFlowClient, TokenStorage};
 use language_model::{
@@ -8,7 +9,6 @@ use language_model::{
 use std::sync::Arc;
 use std::time::Duration;
 use ui::prelude::*;
-use chrono::Utc;
 
 use super::auth::{AuthStatus, DeviceFlowPrompt};
 use super::config::{PROVIDER_ID, PROVIDER_NAME, SCOPES};
@@ -25,7 +25,7 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
     }
 
     fn icon(&self) -> IconOrSvg {
-        IconOrSvg::Icon(IconName::AiZed)
+        IconOrSvg::Icon(IconName::AiKiro)
     }
 
     fn default_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>> {
@@ -43,7 +43,9 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
     fn default_fast_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>> {
         let state = self.state.read(cx);
 
-        let fast_model = state.available_models.iter()
+        let fast_model = state
+            .available_models
+            .iter()
             .find(|m| m.id.contains("haiku") || m.id == "auto");
 
         if let Some(model_def) = fast_model {
@@ -60,7 +62,8 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
             return vec![self.create_default_model()];
         }
 
-        state.available_models
+        state
+            .available_models
             .iter()
             .map(|model_def| self.create_language_model(model_def))
             .collect()
@@ -94,7 +97,9 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
                 }
             };
 
-            let auth_response = device_flow.start_device_authorization(&registration).await?;
+            let auth_response = device_flow
+                .start_device_authorization(&registration)
+                .await?;
 
             let prompt = DeviceFlowPrompt {
                 user_code: auth_response.user_code.clone(),
@@ -110,10 +115,16 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
             })?;
 
             let interval = Duration::from_secs(auth_response.interval);
-            let expires_at = Utc::now() + chrono::Duration::seconds(auth_response.expires_in as i64);
+            let expires_at =
+                Utc::now() + chrono::Duration::seconds(auth_response.expires_in as i64);
 
             let token_result = device_flow
-                .poll_for_token(&registration, &auth_response.device_code, interval, expires_at)
+                .poll_for_token(
+                    &registration,
+                    &auth_response.device_code,
+                    interval,
+                    expires_at,
+                )
                 .await;
 
             match token_result {
@@ -134,7 +145,8 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
                         region_for_fetch,
                         state,
                         &cx,
-                    ).await;
+                    )
+                    .await;
 
                     Ok(())
                 }
@@ -163,7 +175,8 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
         let state = self.state.clone();
         let http_client = self.http_client.clone();
         let credentials_provider = self.credentials_provider.clone();
-        cx.new(|cx| KiroConfigurationView::new(state, http_client, credentials_provider, cx)).into()
+        cx.new(|cx| KiroConfigurationView::new(state, http_client, credentials_provider, cx))
+            .into()
     }
 
     fn reset_credentials(&self, cx: &mut App) -> Task<Result<()>> {

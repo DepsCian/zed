@@ -63,15 +63,50 @@ impl KiroLanguageModelProvider {
             let region = cx.update(|cx| {
                 state.update(cx, |state, cx| {
                     state.set_token(token.clone());
-                    state.set_registration(registration);
+                    state.set_registration(registration.clone());
                     cx.notify();
                     state.region.clone()
                 })
             }).ok().unwrap_or_else(|| DEFAULT_REGION.to_string());
 
             if let Some(token) = token {
-                if !token.is_expired() {
-                    Self::fetch_models_async(http_client, token, region, state, &cx).await;
+                let valid_token = if token.expires_soon(Duration::minutes(5)) {
+                    if let Some(ref reg) = registration {
+                        match token.refresh(&http_client, reg).await {
+                            Ok(new_token) => {
+                                if let Err(e) = storage.save_token(&new_token, &cx).await {
+                                    log::error!("Failed to save refreshed token on startup: {:?}", e);
+                                }
+                                cx.update(|cx| {
+                                    state.update(cx, |state, cx| {
+                                        state.set_token(Some(new_token.clone()));
+                                        cx.notify();
+                                    });
+                                }).ok();
+                                Some(new_token)
+                            }
+                            Err(e) => {
+                                log::error!("Token refresh failed on startup: {:?}", e);
+                                if !token.is_expired() { Some(token) } else { None }
+                            }
+                        }
+                    } else {
+                        if !token.is_expired() { Some(token) } else { None }
+                    }
+                } else {
+                    Some(token)
+                };
+
+                if let Some(t) = valid_token {
+                    Self::fetch_models_async(http_client, t, region, state, &cx).await;
+                } else {
+                    cx.update(|cx| {
+                        state.update(cx, |state, cx| {
+                            state.set_token(None);
+                            state.set_auth_status(AuthStatus::SignedOut);
+                            cx.notify();
+                        });
+                    }).ok();
                 }
             }
         })
