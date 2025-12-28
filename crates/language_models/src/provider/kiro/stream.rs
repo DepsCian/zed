@@ -7,10 +7,35 @@ use kiro::{
 use language_model::{
     LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelRequest,
     LanguageModelToolResultContent, LanguageModelToolUse, MessageContent, Role, StopReason,
+    TokenUsage,
 };
 use std::pin::Pin;
 
 use super::config::PROVIDER_NAME;
+
+const TOKEN_TO_CHAR_RATIO: usize = 4;
+
+fn estimate_tokens(char_count: usize) -> u64 {
+    ((char_count / TOKEN_TO_CHAR_RATIO + 5) / 10 * 10) as u64
+}
+
+pub fn estimate_request_tokens(request: &LanguageModelRequest) -> u64 {
+    let mut total_chars = 0usize;
+    
+    for message in &request.messages {
+        total_chars += message.string_contents().len();
+    }
+    
+    for tool in &request.tools {
+        total_chars += tool.name.len();
+        total_chars += tool.description.len();
+        if let Ok(schema_str) = serde_json::to_string(&tool.input_schema) {
+            total_chars += schema_str.len();
+        }
+    }
+    
+    estimate_tokens(total_chars)
+}
 
 fn normalize_tool_input(tool_use: &LanguageModelToolUse) -> serde_json::Value {
     if let serde_json::Value::Object(obj) = &tool_use.input {
@@ -285,14 +310,23 @@ pub fn map_kiro_error_to_completion_error(error: KiroError) -> LanguageModelComp
 
 pub fn map_chat_events_to_completion_events(
     stream: Pin<Box<dyn Stream<Item = Result<ChatEvent, KiroError>> + Send>>,
+    input_tokens: u64,
 ) -> impl Stream<Item = Result<LanguageModelCompletionEvent, LanguageModelCompletionError>> {
     use futures::StreamExt;
 
     let mut stop_reason = StopReason::EndTurn;
+    let mut output_chars = 0usize;
 
     stream.map(move |result| match result {
-        Ok(ChatEvent::TextDelta { content }) => Ok(LanguageModelCompletionEvent::Text(content)),
+        Ok(ChatEvent::TextDelta { content }) => {
+            output_chars += content.len();
+            Ok(LanguageModelCompletionEvent::Text(content))
+        }
         Ok(ChatEvent::ToolUse { id, name, input, stop }) => {
+            if let Ok(input_str) = serde_json::to_string(&input) {
+                output_chars += input_str.len();
+            }
+            output_chars += name.len();
             if stop {
                 stop_reason = StopReason::ToolUse;
             }
@@ -311,7 +345,18 @@ pub fn map_chat_events_to_completion_events(
             message,
             code
         ))),
-        Ok(ChatEvent::End) => Ok(LanguageModelCompletionEvent::Stop(stop_reason)),
+        Ok(ChatEvent::End) => {
+            let output_tokens = estimate_tokens(output_chars);
+            Ok(LanguageModelCompletionEvent::UsageUpdate(TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            }))
+        }
         Err(e) => Err(map_kiro_error_to_completion_error(e)),
     })
+    .chain(futures::stream::once(async move {
+        Ok(LanguageModelCompletionEvent::Stop(stop_reason))
+    }))
 }

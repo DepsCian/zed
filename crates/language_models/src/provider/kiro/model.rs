@@ -17,7 +17,7 @@ use super::config::{PROVIDER_ID, PROVIDER_NAME};
 use super::provider::KiroLanguageModelProvider;
 use super::state::KiroState;
 use super::stream::{
-    build_send_message_request, map_chat_events_to_completion_events,
+    build_send_message_request, estimate_request_tokens, map_chat_events_to_completion_events,
     map_kiro_error_to_completion_error,
 };
 
@@ -144,12 +144,13 @@ impl LanguageModel for KiroModel {
                 }
             };
 
+            let input_tokens = estimate_request_tokens(&request);
             let kiro_request = build_send_message_request(&request, &model_id);
 
             let stream_result = request_limiter.stream(async move {
                 let client = KiroClient::new(http_client, token, region);
                 let stream = client.send_message(kiro_request).await.map_err(map_kiro_error_to_completion_error)?;
-                Ok(map_chat_events_to_completion_events(stream))
+                Ok(map_chat_events_to_completion_events(stream, input_tokens))
             }).await;
 
             match stream_result {
