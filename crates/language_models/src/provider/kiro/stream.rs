@@ -13,28 +13,25 @@ use std::pin::Pin;
 
 use super::config::PROVIDER_NAME;
 
-const TOKEN_TO_CHAR_RATIO: usize = 4;
-
-fn estimate_tokens(char_count: usize) -> u64 {
-    ((char_count / TOKEN_TO_CHAR_RATIO + 5) / 10 * 10) as u64
-}
-
 pub fn estimate_request_tokens(request: &LanguageModelRequest) -> u64 {
-    let mut total_chars = 0usize;
-    
-    for message in &request.messages {
-        total_chars += message.string_contents().len();
-    }
-    
-    for tool in &request.tools {
-        total_chars += tool.name.len();
-        total_chars += tool.description.len();
-        if let Ok(schema_str) = serde_json::to_string(&tool.input_schema) {
-            total_chars += schema_str.len();
-        }
-    }
-    
-    estimate_tokens(total_chars)
+    let messages = request
+        .messages
+        .iter()
+        .map(|message| tiktoken_rs::ChatCompletionRequestMessage {
+            role: match message.role {
+                Role::User => "user".into(),
+                Role::Assistant => "assistant".into(),
+                Role::System => "system".into(),
+            },
+            content: Some(message.string_contents()),
+            name: None,
+            function_call: None,
+        })
+        .collect::<Vec<_>>();
+
+    tiktoken_rs::num_tokens_from_messages("gpt-4", &messages)
+        .map(|tokens| tokens as u64)
+        .unwrap_or(0)
 }
 
 fn normalize_tool_input(tool_use: &LanguageModelToolUse) -> serde_json::Value {
@@ -43,7 +40,7 @@ fn normalize_tool_input(tool_use: &LanguageModelToolUse) -> serde_json::Value {
             return tool_use.input.clone();
         }
     }
-    
+
     if !tool_use.raw_input.is_empty() {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&tool_use.raw_input) {
             if parsed.is_object() {
@@ -51,30 +48,30 @@ fn normalize_tool_input(tool_use: &LanguageModelToolUse) -> serde_json::Value {
             }
         }
     }
-    
+
     serde_json::json!({})
 }
 
 fn sanitize_history(history: Vec<kiro::HistoryEntry>) -> Vec<kiro::HistoryEntry> {
     use kiro::HistoryEntry;
-    
+
     history
         .into_iter()
         .filter(|entry| {
             let user_valid = entry.user_input_message.as_ref()
                 .map(|m| !m.content.trim().is_empty() || !m.user_input_message_context.tool_results.is_empty())
                 .unwrap_or(false);
-            
+
             let assistant_has_tools = entry.assistant_response_message.as_ref()
                 .map(|m| m.tool_uses.as_ref().map(|t| !t.is_empty()).unwrap_or(false))
                 .unwrap_or(false);
-            
+
             let assistant_has_content = entry.assistant_response_message.as_ref()
                 .map(|m| !m.content.trim().is_empty())
                 .unwrap_or(false);
-            
+
             let assistant_valid = assistant_has_content || assistant_has_tools;
-            
+
             user_valid || assistant_valid
         })
         .collect()
@@ -116,12 +113,12 @@ pub fn build_send_message_request(
 
 fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::HistoryEntry>, String, Vec<ToolResult>) {
     use kiro::{HistoryEntry, UserInputMessage, AssistantResponseMessage, UserInputMessageContext, EnvState, ToolUse};
-    
+
     let mut history = Vec::new();
     let mut current_content = String::new();
     let mut tool_results = Vec::new();
     let mut system_prompt = String::new();
-    
+
     for message in &request.messages {
         if message.role == Role::System {
             for content in &message.content {
@@ -136,20 +133,20 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
             }
         }
     }
-    
+
     let non_system_messages: Vec<_> = request.messages.iter()
         .filter(|m| m.role != Role::System)
         .collect();
-    
+
     for (i, message) in non_system_messages.iter().enumerate() {
         let is_last = i == non_system_messages.len() - 1;
         let is_first_user = i == 0 && message.role == Role::User;
-        
+
         match message.role {
             Role::User => {
                 let mut user_text = String::new();
                 let mut msg_tool_results = Vec::new();
-                
+
                 for content in &message.content {
                     match content {
                         MessageContent::Text(text) => {
@@ -172,7 +169,7 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
                         _ => {}
                     }
                 }
-                
+
                 if is_last {
                     let final_content = if is_first_user && !system_prompt.is_empty() {
                         format!("{}\n\n{}", system_prompt, user_text)
@@ -210,7 +207,7 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
             Role::Assistant => {
                 let mut assistant_content = String::new();
                 let mut assistant_tool_uses: Vec<ToolUse> = Vec::new();
-                
+
                 for content in &message.content {
                     match content {
                         MessageContent::Text(text) => {
@@ -229,17 +226,17 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
                         _ => {}
                     }
                 }
-                
+
                 if !assistant_content.is_empty() || !assistant_tool_uses.is_empty() {
                     history.push(HistoryEntry {
                         user_input_message: None,
                         assistant_response_message: Some(AssistantResponseMessage {
                             content: assistant_content,
                             message_id: None,
-                            tool_uses: if assistant_tool_uses.is_empty() { 
-                                None 
-                            } else { 
-                                Some(assistant_tool_uses) 
+                            tool_uses: if assistant_tool_uses.is_empty() {
+                                None
+                            } else {
+                                Some(assistant_tool_uses)
                             },
                         }),
                     });
@@ -248,9 +245,9 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
             Role::System => {}
         }
     }
-    
+
     let history = sanitize_history(history);
-    
+
     (history, current_content, tool_results)
 }
 
