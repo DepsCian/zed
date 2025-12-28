@@ -13,6 +13,12 @@ use std::pin::Pin;
 
 use super::config::PROVIDER_NAME;
 
+const TOKEN_TO_CHAR_RATIO: usize = 4;
+
+fn estimate_tokens(char_count: usize) -> u64 {
+    ((char_count / TOKEN_TO_CHAR_RATIO + 5) / 10 * 10) as u64
+}
+
 pub fn estimate_request_tokens(request: &LanguageModelRequest) -> u64 {
     let messages = request
         .messages
@@ -53,9 +59,9 @@ fn normalize_tool_input(tool_use: &LanguageModelToolUse) -> serde_json::Value {
 }
 
 fn sanitize_history(history: Vec<kiro::HistoryEntry>) -> Vec<kiro::HistoryEntry> {
-    use kiro::HistoryEntry;
-
-    history
+    use kiro::{HistoryEntry, AssistantResponseMessage};
+    
+    let filtered: Vec<_> = history
         .into_iter()
         .filter(|entry| {
             let user_valid = entry.user_input_message.as_ref()
@@ -74,7 +80,35 @@ fn sanitize_history(history: Vec<kiro::HistoryEntry>) -> Vec<kiro::HistoryEntry>
 
             user_valid || assistant_valid
         })
-        .collect()
+        .collect();
+    
+    let mut result = Vec::with_capacity(filtered.len() * 2);
+    
+    for (i, entry) in filtered.into_iter().enumerate() {
+        let has_user = entry.user_input_message.is_some();
+        let has_assistant = entry.assistant_response_message.is_some();
+        
+        if has_user && !has_assistant && i > 0 {
+            let prev_was_user_only = result.last()
+                .map(|e: &HistoryEntry| e.user_input_message.is_some() && e.assistant_response_message.is_none())
+                .unwrap_or(false);
+            
+            if prev_was_user_only {
+                result.push(HistoryEntry {
+                    user_input_message: None,
+                    assistant_response_message: Some(AssistantResponseMessage {
+                        content: "[Response cancelled by user]".to_string(),
+                        message_id: None,
+                        tool_uses: None,
+                    }),
+                });
+            }
+        }
+        
+        result.push(entry);
+    }
+    
+    result
 }
 
 pub fn build_send_message_request(
