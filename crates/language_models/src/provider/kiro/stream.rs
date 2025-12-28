@@ -30,6 +30,31 @@ fn normalize_tool_input(tool_use: &LanguageModelToolUse) -> serde_json::Value {
     serde_json::json!({})
 }
 
+fn sanitize_history(history: Vec<kiro::HistoryEntry>) -> Vec<kiro::HistoryEntry> {
+    use kiro::HistoryEntry;
+    
+    history
+        .into_iter()
+        .filter(|entry| {
+            let user_valid = entry.user_input_message.as_ref()
+                .map(|m| !m.content.trim().is_empty() || !m.user_input_message_context.tool_results.is_empty())
+                .unwrap_or(false);
+            
+            let assistant_has_tools = entry.assistant_response_message.as_ref()
+                .map(|m| m.tool_uses.as_ref().map(|t| !t.is_empty()).unwrap_or(false))
+                .unwrap_or(false);
+            
+            let assistant_has_content = entry.assistant_response_message.as_ref()
+                .map(|m| !m.content.trim().is_empty())
+                .unwrap_or(false);
+            
+            let assistant_valid = assistant_has_content || assistant_has_tools;
+            
+            user_valid || assistant_valid
+        })
+        .collect()
+}
+
 pub fn build_send_message_request(
     request: &LanguageModelRequest,
     model_id: &str,
@@ -70,8 +95,6 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
     let mut history = Vec::new();
     let mut current_content = String::new();
     let mut tool_results = Vec::new();
-    let mut pending_assistant_content = String::new();
-    let mut pending_assistant_tool_uses: Vec<ToolUse> = Vec::new();
     let mut system_prompt = String::new();
     
     for message in &request.messages {
@@ -99,23 +122,6 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
         
         match message.role {
             Role::User => {
-                if !pending_assistant_content.is_empty() || !pending_assistant_tool_uses.is_empty() {
-                    history.push(HistoryEntry {
-                        user_input_message: None,
-                        assistant_response_message: Some(AssistantResponseMessage {
-                            content: pending_assistant_content.clone(),
-                            message_id: None,
-                            tool_uses: if pending_assistant_tool_uses.is_empty() { 
-                                None 
-                            } else { 
-                                Some(pending_assistant_tool_uses.clone()) 
-                            },
-                        }),
-                    });
-                    pending_assistant_content.clear();
-                    pending_assistant_tool_uses.clear();
-                }
-                
                 let mut user_text = String::new();
                 let mut msg_tool_results = Vec::new();
                 
@@ -134,10 +140,7 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
                             let status = if result.is_error { "error" } else { "success" };
                             msg_tool_results.push(ToolResult {
                                 tool_use_id: result.tool_use_id.to_string(),
-                                content: vec![ToolResultContent {
-                                    text: content_text,
-                                    status: Some(status.to_string()),
-                                }],
+                                content: vec![ToolResultContent { text: content_text }],
                                 status: status.to_string(),
                             });
                         }
@@ -151,7 +154,11 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
                     } else {
                         user_text
                     };
-                    current_content = if msg_tool_results.is_empty() { final_content } else { String::new() };
+                    current_content = if !msg_tool_results.is_empty() && final_content.trim().is_empty() {
+                        ".".to_string()
+                    } else {
+                        final_content
+                    };
                     tool_results = msg_tool_results;
                 } else if !user_text.is_empty() || !msg_tool_results.is_empty() {
                     let final_content = if is_first_user && !system_prompt.is_empty() {
@@ -180,16 +187,19 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
                 }
             }
             Role::Assistant => {
+                let mut assistant_content = String::new();
+                let mut assistant_tool_uses: Vec<ToolUse> = Vec::new();
+                
                 for content in &message.content {
                     match content {
                         MessageContent::Text(text) => {
                             if !text.is_empty() {
-                                pending_assistant_content.push_str(text);
+                                assistant_content.push_str(text);
                             }
                         }
                         MessageContent::ToolUse(tool_use) => {
                             let input = normalize_tool_input(tool_use);
-                            pending_assistant_tool_uses.push(ToolUse {
+                            assistant_tool_uses.push(ToolUse {
                                 tool_use_id: tool_use.id.to_string(),
                                 name: tool_use.name.to_string(),
                                 input,
@@ -198,25 +208,27 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
                         _ => {}
                     }
                 }
+                
+                if !assistant_content.is_empty() || !assistant_tool_uses.is_empty() {
+                    history.push(HistoryEntry {
+                        user_input_message: None,
+                        assistant_response_message: Some(AssistantResponseMessage {
+                            content: assistant_content,
+                            message_id: None,
+                            tool_uses: if assistant_tool_uses.is_empty() { 
+                                None 
+                            } else { 
+                                Some(assistant_tool_uses) 
+                            },
+                        }),
+                    });
+                }
             }
             Role::System => {}
         }
     }
     
-    if !pending_assistant_content.is_empty() || !pending_assistant_tool_uses.is_empty() {
-        history.push(HistoryEntry {
-            user_input_message: None,
-            assistant_response_message: Some(AssistantResponseMessage {
-                content: pending_assistant_content,
-                message_id: None,
-                tool_uses: if pending_assistant_tool_uses.is_empty() { 
-                    None 
-                } else { 
-                    Some(pending_assistant_tool_uses) 
-                },
-            }),
-        });
-    }
+    let history = sanitize_history(history);
     
     (history, current_content, tool_results)
 }

@@ -32,8 +32,6 @@ pub struct ToolResult {
 #[serde(rename_all = "camelCase")]
 pub struct ToolResultContent {
     pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,10 +61,7 @@ impl ToolResult {
     pub fn success(tool_use_id: String, text: String) -> Self {
         Self {
             tool_use_id,
-            content: vec![ToolResultContent {
-                text,
-                status: Some("success".to_string()),
-            }],
+            content: vec![ToolResultContent { text }],
             status: "success".to_string(),
         }
     }
@@ -74,10 +69,7 @@ impl ToolResult {
     pub fn error(tool_use_id: String, text: String) -> Self {
         Self {
             tool_use_id,
-            content: vec![ToolResultContent {
-                text,
-                status: Some("error".to_string()),
-            }],
+            content: vec![ToolResultContent { text }],
             status: "error".to_string(),
         }
     }
