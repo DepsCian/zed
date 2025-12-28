@@ -342,7 +342,7 @@ fn create_terminal(
             window,
             cx,
         );
-        view.set_embedded_mode(Some(1000), cx);
+        view.set_embedded_mode(Some(30), cx);
         view
     })
 }
@@ -354,10 +354,9 @@ fn create_editor_diff(
 ) -> Entity<Editor> {
     cx.new(|cx| {
         let mut editor = Editor::new(
-            EditorMode::Full {
-                scale_ui_elements_with_buffer_font_size: false,
-                show_active_line_background: false,
-                sizing_behavior: SizingBehavior::SizeByContent,
+            EditorMode::AutoHeight {
+                min_lines: 1,
+                max_lines: Some(30),
             },
             diff.read(cx).multibuffer().clone(),
             None,
@@ -370,7 +369,6 @@ fn create_editor_diff(
         editor.set_show_vertical_scrollbar(false, cx);
         editor.set_minimap_visibility(MinimapVisibility::Disabled, window, cx);
         editor.set_soft_wrap_mode(SoftWrap::None, cx);
-        editor.scroll_manager.set_forbid_vertical_scroll(true);
         editor.set_show_indent_guides(false, cx);
         editor.set_read_only(true);
         editor.set_show_breakpoints(false, cx);

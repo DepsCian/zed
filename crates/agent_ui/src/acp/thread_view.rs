@@ -56,6 +56,7 @@ use workspace::{CollaboratorId, NewTerminal, Workspace};
 use zed_actions::agent::{Chat, ToggleModelSelector};
 use zed_actions::assistant::OpenRulesLibrary;
 
+use super::config_options::ConfigOptionsView;
 use super::entry_view_state::EntryViewState;
 use crate::acp::AcpModelSelectorPopover;
 use crate::acp::ModeSelector;
@@ -272,6 +273,7 @@ pub struct AcpThreadView {
     message_editor: Entity<MessageEditor>,
     focus_handle: FocusHandle,
     model_selector: Option<Entity<AcpModelSelectorPopover>>,
+    config_options_view: Option<Entity<ConfigOptionsView>>,
     profile_selector: Option<Entity<ProfileSelector>>,
     notifications: Vec<WindowHandle<AgentNotification>>,
     notification_subscriptions: HashMap<WindowHandle<AgentNotification>, Vec<Subscription>>,
@@ -430,6 +432,7 @@ impl AcpThreadView {
             login: None,
             message_editor,
             model_selector: None,
+            config_options_view: None,
             profile_selector: None,
             notifications: Vec::new(),
             notification_subscriptions: HashMap::default(),
@@ -614,42 +617,64 @@ impl AcpThreadView {
 
                         AgentDiff::set_active_thread(&workspace, thread.clone(), window, cx);
 
-                        this.model_selector = thread
+                        // Check for config options first
+                        // Config options take precedence over legacy mode/model selectors
+                        // (feature flag gating happens at the data layer)
+                        let config_options_provider = thread
                             .read(cx)
                             .connection()
-                            .model_selector(thread.read(cx).session_id())
-                            .map(|selector| {
-                                let agent_server = this.agent.clone();
-                                let fs = this.project.read(cx).fs().clone();
-                                cx.new(|cx| {
-                                    AcpModelSelectorPopover::new(
-                                        selector,
-                                        agent_server,
-                                        fs,
-                                        PopoverMenuHandle::default(),
-                                        this.focus_handle(cx),
-                                        window,
-                                        cx,
-                                    )
-                                })
-                            });
+                            .session_config_options(thread.read(cx).session_id(), cx);
 
-                        let mode_selector = thread
-                            .read(cx)
-                            .connection()
-                            .session_modes(thread.read(cx).session_id(), cx)
-                            .map(|session_modes| {
-                                let fs = this.project.read(cx).fs().clone();
-                                let focus_handle = this.focus_handle(cx);
-                                cx.new(|_cx| {
-                                    ModeSelector::new(
-                                        session_modes,
-                                        this.agent.clone(),
-                                        fs,
-                                        focus_handle,
-                                    )
-                                })
-                            });
+                        let mode_selector;
+                        if let Some(config_options) = config_options_provider {
+                            // Use config options - don't create mode_selector or model_selector
+                            let agent_server = this.agent.clone();
+                            let fs = this.project.read(cx).fs().clone();
+                            this.config_options_view = Some(cx.new(|cx| {
+                                ConfigOptionsView::new(config_options, agent_server, fs, window, cx)
+                            }));
+                            this.model_selector = None;
+                            mode_selector = None;
+                        } else {
+                            // Fall back to legacy mode/model selectors
+                            this.config_options_view = None;
+                            this.model_selector = thread
+                                .read(cx)
+                                .connection()
+                                .model_selector(thread.read(cx).session_id())
+                                .map(|selector| {
+                                    let agent_server = this.agent.clone();
+                                    let fs = this.project.read(cx).fs().clone();
+                                    cx.new(|cx| {
+                                        AcpModelSelectorPopover::new(
+                                            selector,
+                                            agent_server,
+                                            fs,
+                                            PopoverMenuHandle::default(),
+                                            this.focus_handle(cx),
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                });
+
+                            mode_selector = thread
+                                .read(cx)
+                                .connection()
+                                .session_modes(thread.read(cx).session_id(), cx)
+                                .map(|session_modes| {
+                                    let fs = this.project.read(cx).fs().clone();
+                                    let focus_handle = this.focus_handle(cx);
+                                    cx.new(|_cx| {
+                                        ModeSelector::new(
+                                            session_modes,
+                                            this.agent.clone(),
+                                            fs,
+                                            focus_handle,
+                                        )
+                                    })
+                                });
+                        }
 
                         let mut subscriptions = vec![
                             cx.subscribe_in(&thread, window, Self::handle_thread_event),
@@ -1520,6 +1545,10 @@ impl AcpThreadView {
             }
             AcpThreadEvent::ModeUpdated(_mode) => {
                 // The connection keeps track of the mode
+                cx.notify();
+            }
+            AcpThreadEvent::ConfigOptionsUpdated(_) => {
+                // The watch task in ConfigOptionsView handles rebuilding selectors
                 cx.notify();
             }
         }
@@ -3085,7 +3114,6 @@ impl AcpThreadView {
         );
 
         v_flex()
-            .h_full()
             .border_t_1()
             .border_color(self.tool_card_border_color(cx))
             .child(
@@ -3142,12 +3170,26 @@ impl AcpThreadView {
             "terminal-tool-header-group-{}",
             terminal.entity_id()
         ));
-        let header_bg = cx
-            .theme()
-            .colors()
-            .element_background
-            .blend(cx.theme().colors().editor_foreground.opacity(0.025));
-        let border_color = cx.theme().colors().border.opacity(0.6);
+
+        let (header_bg, border_color) = if command_failed {
+            (
+                cx.theme().status().error_background.opacity(0.15),
+                cx.theme().status().error_border.opacity(0.6),
+            )
+        } else if command_finished {
+            (
+                cx.theme().status().success_background.opacity(0.15),
+                cx.theme().status().success_border.opacity(0.6),
+            )
+        } else {
+            (
+                cx.theme()
+                    .colors()
+                    .element_background
+                    .blend(cx.theme().colors().editor_foreground.opacity(0.025)),
+                cx.theme().colors().border.opacity(0.6),
+            )
+        };
 
         let working_dir = working_dir
             .as_ref()
@@ -4417,8 +4459,12 @@ impl AcpThreadView {
                             .gap_1()
                             .children(self.render_token_usage(cx))
                             .children(self.profile_selector.clone())
-                            .children(self.mode_selector().cloned())
-                            .children(self.model_selector.clone())
+                            // Either config_options_view OR (mode_selector + model_selector)
+                            .children(self.config_options_view.clone())
+                            .when(self.config_options_view.is_none(), |this| {
+                                this.children(self.mode_selector().cloned())
+                                    .children(self.model_selector.clone())
+                            })
                             .child(self.render_send_button(cx)),
                     ),
             )
