@@ -134,6 +134,7 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
                     let region_for_fetch = cx.update(|cx| {
                         state.update(cx, |state, cx| {
                             state.set_token(Some(token.clone()));
+                            state.set_registration(Some(registration.clone()));
                             cx.notify();
                             state.region.clone()
                         })
