@@ -179,11 +179,7 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
                     } else {
                         user_text
                     };
-                    current_content = if !msg_tool_results.is_empty() && final_content.trim().is_empty() {
-                        ".".to_string()
-                    } else {
-                        final_content
-                    };
+                    current_content = final_content;
                     tool_results = msg_tool_results;
                 } else if !user_text.is_empty() || !msg_tool_results.is_empty() {
                     let final_content = if is_first_user && !system_prompt.is_empty() {
