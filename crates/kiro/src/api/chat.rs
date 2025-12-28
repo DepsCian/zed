@@ -209,6 +209,15 @@ impl KiroClient {
             response.into_body().read_to_end(&mut body).await?;
             let error_text = String::from_utf8_lossy(&body).to_string();
 
+            if let Ok(request_json) = serde_json::to_string_pretty(&request) {
+                log::error!(
+                    "[KIRO_API_ERROR] HTTP {} - {}\nRequest JSON:\n{}",
+                    status,
+                    error_text,
+                    request_json
+                );
+            }
+
             return Err(match status.as_u16() {
                 429 => KiroError::Api(ApiError::Throttling {
                     message: error_text,
