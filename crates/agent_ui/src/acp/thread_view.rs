@@ -3114,7 +3114,6 @@ impl AcpThreadView {
         );
 
         v_flex()
-            .h_full()
             .border_t_1()
             .border_color(self.tool_card_border_color(cx))
             .child(
