@@ -81,7 +81,20 @@ impl KiroConfigurationView {
                 }
             };
 
-            let auth_response = device_flow.start_device_authorization(&registration).await?;
+            let auth_response = match device_flow.start_device_authorization(&registration).await {
+                Ok(response) => response,
+                Err(err) => {
+                    let err_str = err.to_string();
+                    if err_str.contains("invalid_client") {
+                        storage.delete_registration(&cx).await?;
+                        let reg = device_flow.register_client(SCOPES).await?;
+                        storage.save_registration(&reg, &cx).await?;
+                        device_flow.start_device_authorization(&reg).await?
+                    } else {
+                        return Err(err);
+                    }
+                }
+            };
 
             let prompt = DeviceFlowPrompt {
                 user_code: auth_response.user_code.clone(),

@@ -1,6 +1,6 @@
 use chrono::Utc;
 use gpui::{ClipboardItem, Context};
-use ui::{ButtonLike, ConfiguredApiCard, prelude::*};
+use ui::{ConfiguredApiCard, prelude::*};
 
 use super::auth::{AuthStatus, DeviceFlowPrompt};
 use super::config::{AVAILABLE_REGIONS, AWS_BUILDER_ID_URL};
@@ -22,21 +22,24 @@ impl KiroConfigurationView {
         let current_region = self.selected_region.clone();
 
         v_flex()
-            .gap_1()
+            .gap_2()
             .child(Label::new("Region").size(LabelSize::Small).color(Color::Muted))
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap_1()
                     .children(AVAILABLE_REGIONS.iter().map(|(region, label)| {
                         let is_selected = current_region == *region;
                         let region_str = region.to_string();
 
                         Button::new(SharedString::from(*region), *label)
                             .style(if is_selected {
-                                ButtonStyle::Filled
+                                ButtonStyle::Tinted(ui::TintColor::Accent)
                             } else {
-                                ButtonStyle::Outlined
+                                ButtonStyle::Subtle
                             })
+                            .icon(if is_selected { Some(IconName::Check) } else { None })
+                            .icon_position(IconPosition::Start)
+                            .icon_size(IconSize::Small)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set_region(region_str.clone(), cx);
                             }))
@@ -62,35 +65,38 @@ impl KiroConfigurationView {
             .gap_3()
             .child(
                 v_flex()
-                    .gap_1()
+                    .gap_2()
                     .child(Label::new("Enter this code on AWS:").color(Color::Muted))
                     .child(
-                        ButtonLike::new("copy-code")
-                            .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                        h_flex()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(cx.theme().colors().element_background)
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .justify_between()
+                            .items_center()
                             .child(
-                                h_flex()
-                                    .w_full()
-                                    .px_3()
-                                    .py_2()
-                                    .justify_between()
-                                    .child(
-                                        Label::new(user_code.clone())
-                                            .size(LabelSize::Large)
-                                            .weight(gpui::FontWeight::BOLD),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap_1()
-                                            .child(Icon::new(IconName::Copy).size(IconSize::Small))
-                                            .child(Label::new(if copied { "Copied!" } else { "Copy" })),
-                                    ),
+                                Label::new(user_code.clone())
+                                    .size(LabelSize::Large)
+                                    .weight(gpui::FontWeight::BOLD)
+                                    .color(Color::Default),
                             )
-                            .on_click({
-                                let code = user_code.clone();
-                                move |_, _window: &mut Window, cx: &mut App| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                                }
-                            }),
+                            .child(
+                                Button::new("copy-code", if copied { "Copied!" } else { "Copy" })
+                                    .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                                    .icon(if copied { IconName::Check } else { IconName::Copy })
+                                    .icon_size(IconSize::Small)
+                                    .icon_position(IconPosition::Start)
+                                    .on_click({
+                                        let code = user_code.clone();
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                                        }
+                                    }),
+                            ),
                     ),
             )
             .child(
@@ -98,7 +104,7 @@ impl KiroConfigurationView {
                     .gap_2()
                     .child(
                         Button::new("open-aws", "Open AWS")
-                            .style(ButtonStyle::Outlined)
+                            .style(ButtonStyle::Filled)
                             .icon(IconName::ArrowUpRight)
                             .icon_size(IconSize::Small)
                             .icon_position(IconPosition::End)
@@ -130,7 +136,7 @@ impl KiroConfigurationView {
     pub fn render_sign_in_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         Button::new("sign-in", "Sign in with AWS Builder ID")
             .full_width()
-            .style(ButtonStyle::Outlined)
+            .style(ButtonStyle::Filled)
             .icon(IconName::Person)
             .icon_position(IconPosition::Start)
             .icon_size(IconSize::Small)
