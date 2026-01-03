@@ -364,13 +364,13 @@ fn create_editor_diff(
             window,
             cx,
         );
-        editor.set_show_gutter(false, cx);
+        editor.set_show_gutter(true, cx);
         editor.disable_inline_diagnostics();
         editor.disable_expand_excerpt_buttons(cx);
-        editor.set_show_vertical_scrollbar(false, cx);
+        editor.set_show_vertical_scrollbar(true, cx);
         editor.set_minimap_visibility(MinimapVisibility::Disabled, window, cx);
         editor.set_soft_wrap_mode(SoftWrap::None, cx);
-        editor.scroll_manager.set_forbid_vertical_scroll(true);
+        editor.scroll_manager.set_forbid_vertical_scroll(false);
         editor.set_show_indent_guides(false, cx);
         editor.set_read_only(true);
         editor.set_show_breakpoints(false, cx);
@@ -378,6 +378,7 @@ fn create_editor_diff(
         editor.set_show_git_diff_gutter(false, cx);
         editor.set_expand_all_diff_hunks(cx);
         editor.set_text_style_refinement(diff_editor_text_style_refinement(cx));
+        editor.show_local_selections = false;
         editor
     })
 }

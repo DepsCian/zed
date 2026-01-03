@@ -3113,14 +3113,19 @@ impl AcpThreadView {
             ToolCallStatus::InProgress | ToolCallStatus::Pending
         );
 
+        let entry = self.entry_view_state.read(cx).entry(entry_ix);
+        let editor = entry.as_ref().and_then(|e| e.editor_for_diff(diff));
+        let has_revealed = diff.read(cx).has_revealed_range(cx);
+
         v_flex()
-            .h_full()
+            .id(("diff-editor-container", entry_ix))
+            .max_h(px(400.))
+            .overflow_y_scroll()
             .border_t_1()
             .border_color(self.tool_card_border_color(cx))
             .child(
-                if let Some(entry) = self.entry_view_state.read(cx).entry(entry_ix)
-                    && let Some(editor) = entry.editor_for_diff(diff)
-                    && diff.read(cx).has_revealed_range(cx)
+                if let Some(editor) = editor
+                    && has_revealed
                 {
                     editor.into_any_element()
                 } else if tool_progress && self.as_native_connection(cx).is_some() {
