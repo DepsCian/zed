@@ -3113,13 +3113,19 @@ impl AcpThreadView {
             ToolCallStatus::InProgress | ToolCallStatus::Pending
         );
 
+        let entry = self.entry_view_state.read(cx).entry(entry_ix);
+        let editor = entry.as_ref().and_then(|e| e.editor_for_diff(diff));
+        let has_revealed = diff.read(cx).has_revealed_range(cx);
+
         v_flex()
+            .id(("diff-editor-container", entry_ix))
+            .max_h(px(400.))
+            .overflow_y_scroll()
             .border_t_1()
             .border_color(self.tool_card_border_color(cx))
             .child(
-                if let Some(entry) = self.entry_view_state.read(cx).entry(entry_ix)
-                    && let Some(editor) = entry.editor_for_diff(diff)
-                    && diff.read(cx).has_revealed_range(cx)
+                if let Some(editor) = editor
+                    && has_revealed
                 {
                     editor.into_any_element()
                 } else if tool_progress && self.as_native_connection(cx).is_some() {
@@ -3170,26 +3176,12 @@ impl AcpThreadView {
             "terminal-tool-header-group-{}",
             terminal.entity_id()
         ));
-
-        let (header_bg, border_color) = if command_failed {
-            (
-                cx.theme().status().error_background.opacity(0.15),
-                cx.theme().status().error_border.opacity(0.6),
-            )
-        } else if command_finished {
-            (
-                cx.theme().status().success_background.opacity(0.15),
-                cx.theme().status().success_border.opacity(0.6),
-            )
-        } else {
-            (
-                cx.theme()
-                    .colors()
-                    .element_background
-                    .blend(cx.theme().colors().editor_foreground.opacity(0.025)),
-                cx.theme().colors().border.opacity(0.6),
-            )
-        };
+        let header_bg = cx
+            .theme()
+            .colors()
+            .element_background
+            .blend(cx.theme().colors().editor_foreground.opacity(0.025));
+        let border_color = cx.theme().colors().border.opacity(0.6);
 
         let working_dir = working_dir
             .as_ref()

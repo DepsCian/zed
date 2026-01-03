@@ -342,7 +342,7 @@ fn create_terminal(
             window,
             cx,
         );
-        view.set_embedded_mode(Some(30), cx);
+        view.set_embedded_mode(Some(1000), cx);
         view
     })
 }
@@ -354,21 +354,23 @@ fn create_editor_diff(
 ) -> Entity<Editor> {
     cx.new(|cx| {
         let mut editor = Editor::new(
-            EditorMode::AutoHeight {
-                min_lines: 1,
-                max_lines: Some(30),
+            EditorMode::Full {
+                scale_ui_elements_with_buffer_font_size: false,
+                show_active_line_background: false,
+                sizing_behavior: SizingBehavior::SizeByContent,
             },
             diff.read(cx).multibuffer().clone(),
             None,
             window,
             cx,
         );
-        editor.set_show_gutter(false, cx);
+        editor.set_show_gutter(true, cx);
         editor.disable_inline_diagnostics();
         editor.disable_expand_excerpt_buttons(cx);
-        editor.set_show_vertical_scrollbar(false, cx);
+        editor.set_show_vertical_scrollbar(true, cx);
         editor.set_minimap_visibility(MinimapVisibility::Disabled, window, cx);
         editor.set_soft_wrap_mode(SoftWrap::None, cx);
+        editor.scroll_manager.set_forbid_vertical_scroll(false);
         editor.set_show_indent_guides(false, cx);
         editor.set_read_only(true);
         editor.set_show_breakpoints(false, cx);
@@ -376,6 +378,7 @@ fn create_editor_diff(
         editor.set_show_git_diff_gutter(false, cx);
         editor.set_expand_all_diff_hunks(cx);
         editor.set_text_style_refinement(diff_editor_text_style_refinement(cx));
+        editor.show_local_selections = false;
         editor
     })
 }
