@@ -2381,7 +2381,6 @@ dependencies = [
 name = "buffer_diff"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clock",
  "ctor",
  "futures 0.3.31",
@@ -8654,7 +8653,6 @@ dependencies = [
  "extension",
  "gpui",
  "language",
- "lsp",
  "paths",
  "project",
  "schemars",
