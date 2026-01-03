@@ -280,7 +280,19 @@ fn build_conversation_parts(request: &LanguageModelRequest) -> (Vec<kiro::Histor
         }
     }
 
-    let history = sanitize_history(history);
+    let mut history = sanitize_history(history);
+
+    if !current_content.is_empty() {
+        if let Some(last) = history.last_mut() {
+            if last.assistant_response_message.is_none() {
+                last.assistant_response_message = Some(AssistantResponseMessage {
+                    content: String::new(),
+                    message_id: None,
+                    tool_uses: None,
+                });
+            }
+        }
+    }
 
     (history, current_content, tool_results)
 }
