@@ -1899,18 +1899,33 @@ impl AcpThread {
             return Task::ready(());
         };
 
+        let mut terminals_to_kill = Vec::new();
+
         for entry in self.entries.iter_mut() {
             if let AgentThreadEntry::ToolCall(call) = entry {
-                let cancel = matches!(
+                let should_cancel = matches!(
                     call.status,
                     ToolCallStatus::Pending
                         | ToolCallStatus::WaitingForConfirmation { .. }
                         | ToolCallStatus::InProgress
                 );
 
-                if cancel {
+                if should_cancel {
+                    for terminal in call.terminals() {
+                        if let Some(id) = terminal.read(cx).id().clone().into() {
+                            terminals_to_kill.push(id);
+                        }
+                    }
                     call.status = ToolCallStatus::Canceled;
                 }
+            }
+        }
+
+        for terminal_id in terminals_to_kill {
+            if let Some(terminal) = self.terminals.get(&terminal_id) {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.kill(cx);
+                });
             }
         }
 
