@@ -112,7 +112,7 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
                     state.set_auth_status(AuthStatus::SigningIn { prompt });
                     cx.notify();
                 });
-            })?;
+            });
 
             let interval = Duration::from_secs(auth_response.interval);
             let expires_at =
@@ -138,7 +138,7 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
                             cx.notify();
                             state.region.clone()
                         })
-                    })?;
+                    });
 
                     KiroLanguageModelProvider::fetch_models_async(
                         http_client,
@@ -159,7 +159,7 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
                             state.set_auth_status(AuthStatus::Error(error_msg.clone()));
                             cx.notify();
                         });
-                    })?;
+                    });
 
                     Err(anyhow!(error_msg).into())
                 }
@@ -197,7 +197,7 @@ impl LanguageModelProvider for KiroLanguageModelProvider {
                     state.set_auth_status(AuthStatus::SignedOut);
                     cx.notify();
                 });
-            })?;
+            });
 
             Ok(())
         })

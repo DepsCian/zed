@@ -107,7 +107,7 @@ impl KiroConfigurationView {
                     state.set_auth_status(AuthStatus::SigningIn { prompt });
                     cx.notify();
                 });
-            })?;
+            });
 
             let interval = Duration::from_secs(auth_response.interval);
             let expires_at = Utc::now() + chrono::Duration::seconds(auth_response.expires_in as i64);
@@ -125,7 +125,7 @@ impl KiroConfigurationView {
                             state.set_token(Some(token));
                             cx.notify();
                         });
-                    })?;
+                    });
                 }
                 Err(poll_error) => {
                     let error_msg = poll_error.to_string();
@@ -135,7 +135,7 @@ impl KiroConfigurationView {
                             state.set_auth_status(AuthStatus::Error(error_msg));
                             cx.notify();
                         });
-                    })?;
+                    });
                 }
             }
 
@@ -163,7 +163,7 @@ impl KiroConfigurationView {
                     state.set_auth_status(AuthStatus::SignedOut);
                     cx.notify();
                 });
-            })?;
+            });
 
             anyhow::Ok(())
         })
