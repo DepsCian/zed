@@ -67,7 +67,7 @@ impl KiroLanguageModelProvider {
                     cx.notify();
                     state.region.clone()
                 })
-            }).ok().unwrap_or_else(|| DEFAULT_REGION.to_string());
+            });
 
             if let Some(token) = token {
                 let valid_token = if token.expires_soon(Duration::minutes(5)) {
@@ -82,7 +82,7 @@ impl KiroLanguageModelProvider {
                                         state.set_token(Some(new_token.clone()));
                                         cx.notify();
                                     });
-                                }).ok();
+                                });
                                 Some(new_token)
                             }
                             Err(e) => {
@@ -106,7 +106,7 @@ impl KiroLanguageModelProvider {
                             state.set_auth_status(AuthStatus::SignedOut);
                             cx.notify();
                         });
-                    }).ok();
+                    });
                 }
             }
         })
@@ -137,7 +137,7 @@ impl KiroLanguageModelProvider {
                         state.set_available_models(models, default_id);
                         cx.notify();
                     });
-                }).ok();
+                });
             }
             Err(e) => {
                 log::error!("Failed to fetch Kiro models: {:?}", e);
@@ -200,7 +200,7 @@ impl KiroLanguageModelProvider {
         let (token, registration, region) = cx.update(|cx| {
             let s = state.read(cx);
             (s.token.clone(), s.registration.clone(), s.region.clone())
-        }).ok()?;
+        });
 
         let token = token?;
         let registration = registration?;
@@ -223,7 +223,7 @@ impl KiroLanguageModelProvider {
                         state.set_token(Some(new_token.clone()));
                         cx.notify();
                     });
-                }).ok();
+                });
 
                 log::info!("Token refreshed successfully");
                 Some((new_token, region))
@@ -239,7 +239,7 @@ impl KiroLanguageModelProvider {
                             state.set_auth_status(AuthStatus::SignedOut);
                             cx.notify();
                         });
-                    }).ok();
+                    });
                     None
                 }
             }
