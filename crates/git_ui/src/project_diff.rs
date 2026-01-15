@@ -9,7 +9,7 @@ use buffer_diff::{BufferDiff, DiffHunkSecondaryStatus};
 use collections::{HashMap, HashSet};
 use editor::{
     Addon, Editor, EditorEvent, SelectionEffects, SplittableEditor,
-    actions::{GoToHunk, GoToPreviousHunk},
+    actions::{GoToHunk, GoToPreviousHunk, SendReviewToAgent},
     multibuffer_context_lines,
     scroll::Autoscroll,
 };
@@ -70,6 +70,7 @@ pub struct ProjectDiff {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     pending_scroll: Option<PathKey>,
+    review_comment_count: usize,
     _task: Task<Result<()>>,
     _subscription: Subscription,
 }
@@ -182,6 +183,37 @@ impl ProjectDiff {
         }
     }
 
+    pub fn deploy_at_project_path(
+        workspace: &mut Workspace,
+        project_path: ProjectPath,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        telemetry::event!("Git Diff Opened", source = "Agent Panel");
+        let existing = workspace
+            .items_of_type::<Self>(cx)
+            .find(|item| matches!(item.read(cx).diff_base(cx), DiffBase::Head));
+        let project_diff = if let Some(existing) = existing {
+            workspace.activate_item(&existing, true, true, window, cx);
+            existing
+        } else {
+            let workspace_handle = cx.entity();
+            let project_diff =
+                cx.new(|cx| Self::new(workspace.project().clone(), workspace_handle, window, cx));
+            workspace.add_item_to_active_pane(
+                Box::new(project_diff.clone()),
+                None,
+                true,
+                window,
+                cx,
+            );
+            project_diff
+        };
+        project_diff.update(cx, |project_diff, cx| {
+            project_diff.move_to_project_path(&project_path, window, cx);
+        });
+    }
+
     pub fn autoscroll(&self, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| {
             editor.primary_editor().update(cx, |editor, cx| {
@@ -258,6 +290,7 @@ impl ProjectDiff {
                 .primary_editor()
                 .update(cx, |editor, cx| {
                     editor.disable_diagnostics(cx);
+                    editor.set_show_diff_review_button(true, cx);
 
                     match branch_diff.read(cx).diff_base() {
                         DiffBase::Head => {
@@ -279,8 +312,16 @@ impl ProjectDiff {
                 });
             diff_display_editor
         });
-        cx.subscribe_in(&editor, window, Self::handle_editor_event)
-            .detach();
+        let editor_subscription = cx.subscribe_in(&editor, window, Self::handle_editor_event);
+
+        let primary_editor = editor.read(cx).primary_editor().clone();
+        let review_comment_subscription =
+            cx.subscribe(&primary_editor, |this, _editor, event: &EditorEvent, cx| {
+                if let EditorEvent::ReviewCommentsChanged { total_count } = event {
+                    this.review_comment_count = *total_count;
+                    cx.notify();
+                }
+            });
 
         let branch_diff_subscription = cx.subscribe_in(
             &branch_diff,
@@ -331,8 +372,12 @@ impl ProjectDiff {
             multibuffer,
             buffer_diff_subscriptions: Default::default(),
             pending_scroll: None,
+            review_comment_count: 0,
             _task: task,
-            _subscription: branch_diff_subscription,
+            _subscription: Subscription::join(
+                branch_diff_subscription,
+                Subscription::join(editor_subscription, review_comment_subscription),
+            ),
         }
     }
 
@@ -353,6 +398,31 @@ impl ProjectDiff {
         let sort_prefix = sort_prefix(repo, &entry.repo_path, entry.status, cx);
         let path_key = PathKey::with_sort_prefix(sort_prefix, entry.repo_path.as_ref().clone());
 
+        self.move_to_path(path_key, window, cx)
+    }
+
+    pub fn move_to_project_path(
+        &mut self,
+        project_path: &ProjectPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(git_repo) = self.branch_diff.read(cx).repo() else {
+            return;
+        };
+        let Some(repo_path) = git_repo
+            .read(cx)
+            .project_path_to_repo_path(project_path, cx)
+        else {
+            return;
+        };
+        let status = git_repo
+            .read(cx)
+            .status_for_path(&repo_path)
+            .map(|entry| entry.status)
+            .unwrap_or(FileStatus::Untracked);
+        let sort_prefix = sort_prefix(&git_repo.read(cx), &repo_path, status, cx);
+        let path_key = PathKey::with_sort_prefix(sort_prefix, repo_path.as_ref().clone());
         self.move_to_path(path_key, window, cx)
     }
 
@@ -394,6 +464,16 @@ impl ProjectDiff {
         } else {
             self.pending_scroll = Some(path_key);
         }
+    }
+
+    /// Returns the total count of review comments across all hunks/files.
+    pub fn total_review_comment_count(&self) -> usize {
+        self.review_comment_count
+    }
+
+    /// Returns a reference to the splittable editor.
+    pub fn editor(&self) -> &Entity<SplittableEditor> {
+        &self.editor
     }
 
     fn button_states(&self, cx: &App) -> ButtonStates {
@@ -1221,6 +1301,7 @@ impl Render for ProjectDiffToolbar {
         };
         let focus_handle = project_diff.focus_handle(cx);
         let button_states = project_diff.read(cx).button_states(cx);
+        let review_count = project_diff.read(cx).total_review_comment_count();
 
         h_group_xl()
             .my_neg_1()
@@ -1362,6 +1443,25 @@ impl Render for ProjectDiffToolbar {
                             })),
                     ),
             )
+            // "Send Review to Agent" button (only shown when there are review comments)
+            .when(review_count > 0, |el| {
+                el.child(vertical_divider()).child(
+                    Button::new(
+                        "send-review",
+                        format!("Send Review to Agent ({})", review_count),
+                    )
+                    .icon(IconName::ZedAssistant)
+                    .icon_position(IconPosition::Start)
+                    .tooltip(Tooltip::for_action_title_in(
+                        "Send all review comments to the Agent panel",
+                        &SendReviewToAgent,
+                        &focus_handle,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.dispatch_action(&SendReviewToAgent, window, cx)
+                    })),
+                )
+            })
     }
 }
 

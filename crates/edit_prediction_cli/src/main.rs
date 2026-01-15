@@ -21,7 +21,8 @@ use collections::HashSet;
 use edit_prediction::EditPredictionStore;
 use futures::channel::mpsc;
 use futures::{SinkExt as _, StreamExt as _};
-use gpui::{AppContext as _, Application};
+use gpui::{AppContext as _, Application, BackgroundExecutor};
+use zeta_prompt::ZetaVersion;
 
 use reqwest_client::ReqwestClient;
 use serde::{Deserialize, Serialize};
@@ -155,7 +156,7 @@ impl Display for Command {
                 f,
                 "format-prompt --prompt-format={}",
                 format_prompt_args
-                    .prompt_format
+                    .provider
                     .to_possible_value()
                     .unwrap()
                     .get_name()
@@ -193,7 +194,7 @@ impl Display for Command {
                     .get_name()
             ),
             Command::Synthesize(args) => {
-                write!(f, "synthesize --repo={}", args.repo)
+                write!(f, "synthesize --repos {}", args.repos.join(" "))
             }
             Command::Clean => write!(f, "clean"),
             Command::SplitCommit(_) => write!(f, "split-commit"),
@@ -204,22 +205,31 @@ impl Display for Command {
 
 #[derive(Debug, Args, Clone)]
 struct FormatPromptArgs {
-    #[clap(long, short('p'))]
-    prompt_format: PromptFormat,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
-enum PromptFormat {
-    Teacher,
-    Zeta2,
+    #[clap(long, short)]
+    provider: PredictionProvider,
+    #[clap(
+        long,
+        short,
+        help = "(only for --provider zeta2) A substring of a zeta_prompt::ZetaVersion variant to use",
+        value_parser = ZetaVersion::parse,
+        default_value_t = ZetaVersion::default(),
+    )]
+    version: ZetaVersion,
 }
 
 #[derive(Debug, Args, Clone)]
 struct PredictArgs {
-    #[clap(long)]
+    #[clap(long, short)]
     provider: PredictionProvider,
     #[clap(long, default_value_t = 1)]
     repetitions: usize,
+    #[clap(
+        long,
+        short,
+        help = "(only for --provider zeta2) A substring of a zeta_prompt::ZetaVersion variant to use",
+        value_parser = ZetaVersion::parse,
+    )]
+    version: ZetaVersion,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum, Serialize, Deserialize)]
@@ -234,15 +244,15 @@ enum PredictionProvider {
 
 #[derive(Debug, Args, Clone)]
 struct SynthesizeArgs {
-    /// Repository URL (git@github.com:owner/repo or https://...)
-    #[clap(long)]
-    repo: String,
+    /// Repository URLs (git@github.com:owner/repo or https://...)
+    #[clap(long, required = true, num_args = 1..)]
+    repos: Vec<String>,
 
-    /// Number of examples to generate
+    /// Number of examples to generate per repository
     #[clap(long, default_value_t = 5)]
     count: usize,
 
-    /// Maximum commits to scan before giving up
+    /// Maximum commits to scan per repository before giving up
     #[clap(long, default_value_t = 100)]
     max_commits: usize,
 
@@ -269,6 +279,7 @@ async fn load_examples(
     http_client: Arc<dyn http_client::HttpClient>,
     args: &EpArgs,
     output_path: Option<&PathBuf>,
+    background_executor: BackgroundExecutor,
 ) -> anyhow::Result<Vec<Example>> {
     let mut captured_after_timestamps = Vec::new();
     let mut file_inputs = Vec::new();
@@ -302,6 +313,7 @@ async fn load_examples(
             http_client,
             &captured_after_timestamps,
             max_rows_per_timestamp,
+            background_executor,
         )
         .await?;
         examples.append(&mut captured_examples);
@@ -413,7 +425,7 @@ fn main() {
                 panic!("output dir is required");
             };
             let config = SynthesizeConfig {
-                repo_url: synth_args.repo.clone(),
+                repo_urls: synth_args.repos.clone(),
                 count: synth_args.count,
                 max_commits: synth_args.max_commits,
                 output_dir,
@@ -455,8 +467,13 @@ fn main() {
 
         cx.spawn(async move |cx| {
             let result = async {
-                let mut examples =
-                    load_examples(app_state.client.http_client(), &args, output.as_ref()).await?;
+                let mut examples = load_examples(
+                    app_state.client.http_client(),
+                    &args,
+                    output.as_ref(),
+                    cx.background_executor().clone(),
+                )
+                .await?;
 
                 match &command {
                     Command::Predict(args) | Command::Score(args) | Command::Eval(args) => {
@@ -514,7 +531,7 @@ fn main() {
                                     Command::FormatPrompt(args) => {
                                         run_format_prompt(
                                             example,
-                                            args.prompt_format,
+                                            args,
                                             app_state.clone(),
                                             cx.clone(),
                                         )
@@ -523,8 +540,7 @@ fn main() {
                                     Command::Predict(args) => {
                                         run_prediction(
                                             example,
-                                            Some(args.provider),
-                                            args.repetitions,
+                                            args,
                                             app_state.clone(),
                                             cx.clone(),
                                         )
