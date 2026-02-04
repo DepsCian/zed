@@ -392,7 +392,6 @@ impl VsCodeSettings {
     fn project_settings_content(&self) -> ProjectSettingsContent {
         ProjectSettingsContent {
             all_languages: AllLanguageSettingsContent {
-                features: None,
                 edit_predictions: self.edit_predictions_settings_content(),
                 defaults: self.default_language_settings_content(),
                 languages: Default::default(),
@@ -665,6 +664,7 @@ impl VsCodeSettings {
         let mut project_panel_settings = ProjectPanelSettingsContent {
             auto_fold_dirs: self.read_bool("explorer.compactFolders"),
             auto_reveal_entries: self.read_bool("explorer.autoReveal"),
+            bold_folder_labels: None,
             button: None,
             default_width: None,
             dock: None,
@@ -803,7 +803,7 @@ impl VsCodeSettings {
             buffer_font_family,
             buffer_font_fallbacks,
             buffer_font_size: self.read_f32("editor.fontSize").map(FontSize::from),
-            buffer_font_weight: self.read_f32("editor.fontWeight").map(|w| w.into()),
+            buffer_font_weight: self.read_f32("editor.fontWeight").map(FontWeightContent),
             buffer_line_height: None,
             buffer_font_features: None,
             agent_ui_font_size: None,
