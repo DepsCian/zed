@@ -1,6 +1,6 @@
 use chrono::Utc;
 use credentials_provider::CredentialsProvider;
-use gpui::{Context, Entity, Subscription, Task, Timer};
+use gpui::{Context, Entity, Subscription, Task};
 use http_client::HttpClient;
 use kiro::{DeviceFlowClient, TokenStorage};
 use std::sync::Arc;
@@ -42,14 +42,8 @@ impl KiroConfigurationView {
     fn start_countdown(&mut self, cx: &mut Context<Self>) {
         self.countdown_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                Timer::after(Duration::from_secs(1)).await;
-                let should_continue = this
-                    .update(cx, |_this, cx| {
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !should_continue {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update(cx, |_this, cx| cx.notify()).is_err() {
                     break;
                 }
             }
