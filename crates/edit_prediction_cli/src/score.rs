@@ -1,6 +1,6 @@
 use crate::{
     PredictArgs, PredictionProvider,
-    example::{Example, ExampleScore},
+    example::{ActualCursor, Example, ExampleScore},
     format_prompt::TeacherPrompt,
     headless::EpAppState,
     metrics,
@@ -30,11 +30,11 @@ pub async fn run_scoring(
     let progress = example_progress.start(Step::Score);
 
     progress.set_substatus("applying patches");
-    let original_text = &example
+    let prompt_inputs = example
         .prompt_inputs
         .as_ref()
-        .context("prompt_inputs is required for scoring - run prediction first or ensure JSON includes prompt_inputs")?
-        .content;
+        .context("prompt_inputs is required for scoring - run prediction first or ensure JSON includes prompt_inputs")?;
+    let original_text: &str = prompt_inputs.cursor_excerpt.as_ref();
     let expected_patches_with_cursors = example.spec.expected_patches_with_cursor_positions();
 
     let expected_texts: Vec<String> = expected_patches_with_cursors
@@ -75,9 +75,11 @@ pub async fn run_scoring(
         cursor_distance: None,
         cursor_exact_match: None,
         wrong_editable_region: None,
+        has_isolated_whitespace_changes: false,
+        inserted_tokens: 0,
+        deleted_tokens: 0,
     };
 
-    let prompt_inputs = example.prompt_inputs.as_ref().unwrap();
     let cursor_path = example.spec.cursor_path.as_ref();
 
     progress.set_substatus("computing metrics");
@@ -94,10 +96,15 @@ pub async fn run_scoring(
             continue;
         };
 
+        let token_changes = metrics::count_patch_token_changes(&actual_patch);
+
         let actual_text = match apply_diff_to_string(&actual_patch, original_text) {
             Ok(text) => text,
             Err(_) => {
-                scores.push(zero_scores.clone());
+                let mut s = zero_scores.clone();
+                s.inserted_tokens = token_changes.inserted_tokens;
+                s.deleted_tokens = token_changes.deleted_tokens;
+                scores.push(s);
                 continue;
             }
         };
@@ -158,10 +165,16 @@ pub async fn run_scoring(
 
         // Compute cursor position metrics
         let (cursor_distance, cursor_exact_match) =
-            compute_cursor_metrics(best_expected_cursor, prediction.actual_cursor_offset);
+            compute_cursor_metrics(best_expected_cursor, prediction.actual_cursor.as_ref());
 
         // Compute approximation of editable region correctness
         let wrong_editable_region = Some(!metrics::is_editable_region_correct(&actual_patch));
+
+        // Check for isolated whitespace changes.
+        let has_isolated_whitespace_changes = metrics::has_isolated_whitespace_changes(
+            &actual_patch,
+            prediction.actual_cursor.as_ref(),
+        );
 
         scores.push(ExampleScore {
             delta_chr_f: best_delta_chr_f,
@@ -173,6 +186,9 @@ pub async fn run_scoring(
             cursor_distance,
             cursor_exact_match,
             wrong_editable_region,
+            has_isolated_whitespace_changes,
+            inserted_tokens: token_changes.inserted_tokens,
+            deleted_tokens: token_changes.deleted_tokens,
         });
     }
 
@@ -181,13 +197,13 @@ pub async fn run_scoring(
 }
 
 fn compute_cursor_metrics(
-    expected_cursor: Option<usize>,
-    actual_cursor: Option<usize>,
+    expected_cursor_editable_region_offset: Option<usize>,
+    actual_cursor: Option<&ActualCursor>,
 ) -> (Option<usize>, Option<bool>) {
-    match (expected_cursor, actual_cursor) {
+    match (expected_cursor_editable_region_offset, actual_cursor) {
         (Some(expected), Some(actual)) => {
-            let distance = expected.abs_diff(actual);
-            let exact_match = expected == actual;
+            let distance = expected.abs_diff(actual.editable_region_offset.unwrap_or_default());
+            let exact_match = distance == 0;
             (Some(distance), Some(exact_match))
         }
         (None, None) => {
@@ -201,7 +217,8 @@ fn compute_cursor_metrics(
     }
 }
 
-pub fn print_report(examples: &[Example]) {
+pub fn print_report(examples: &[Example], verbose: bool) {
+    const MAX_EXAMPLES_DEFAULT: usize = 20;
     use crate::metrics::ClassificationMetrics;
 
     const LINE_WIDTH: usize = 101;
@@ -229,6 +246,13 @@ pub fn print_report(examples: &[Example]) {
     let mut cursor_distance_count: usize = 0;
     let mut wrong_editable_region_count: usize = 0;
     let mut wrong_editable_region_total: usize = 0;
+    let mut isolated_whitespace_count: usize = 0;
+    let mut patch_inserted_tokens: Vec<usize> = Vec::new();
+    let mut patch_deleted_tokens: Vec<usize> = Vec::new();
+    let mut predictions_with_patch: usize = 0;
+
+    let mut printed_lines: usize = 0;
+    let mut skipped_lines: usize = 0;
 
     for example in examples {
         for (score_idx, score) in example.score.iter().enumerate() {
@@ -264,18 +288,23 @@ pub fn print_report(examples: &[Example]) {
                 (None, _) => "-".to_string(),
             };
 
-            println!(
-                "{:<40} {:>8.2} {:>5} {:>6.1}% {:>6.1}% {:>7} {:>7} {:>6} {:>5}",
-                truncate_name(&example.spec.name, 40),
-                score.delta_chr_f,
-                score.braces_disbalance,
-                exact_lines.f1() * 100.0,
-                score.reversal_ratio * 100.0,
-                qa_reverts_str,
-                qa_conf_str,
-                cursor_str,
-                wrong_er_str
-            );
+            if verbose || printed_lines < MAX_EXAMPLES_DEFAULT {
+                println!(
+                    "{:<40} {:>8.2} {:>5} {:>6.1}% {:>6.1}% {:>7} {:>7} {:>6} {:>5}",
+                    truncate_name(&example.spec.name, 40),
+                    score.delta_chr_f,
+                    score.braces_disbalance,
+                    exact_lines.f1() * 100.0,
+                    score.reversal_ratio * 100.0,
+                    qa_reverts_str,
+                    qa_conf_str,
+                    cursor_str,
+                    wrong_er_str
+                );
+                printed_lines += 1;
+            } else {
+                skipped_lines += 1;
+            }
 
             all_delta_chr_f_scores.push(score.delta_chr_f);
             all_reversal_ratios.push(score.reversal_ratio);
@@ -307,6 +336,23 @@ pub fn print_report(examples: &[Example]) {
                 }
             }
 
+            // Accumulate isolated whitespace metrics
+            if score.has_isolated_whitespace_changes {
+                isolated_whitespace_count += 1;
+            }
+
+            // Accumulate token change metrics (only for predictions that produced a patch)
+            let has_patch = example
+                .predictions
+                .get(score_idx)
+                .and_then(|p| p.actual_patch.as_ref())
+                .is_some_and(|p| !p.is_empty());
+            if has_patch {
+                predictions_with_patch += 1;
+                patch_inserted_tokens.push(score.inserted_tokens);
+                patch_deleted_tokens.push(score.deleted_tokens);
+            }
+
             // Accumulate cursor metrics
             if let Some(exact_match) = score.cursor_exact_match {
                 cursor_total += 1;
@@ -321,6 +367,13 @@ pub fn print_report(examples: &[Example]) {
         }
     }
 
+    if skipped_lines > 0 {
+        println!(
+            "{:<40} (use --verbose to see all {} examples)",
+            format!("... and {} more", skipped_lines),
+            printed_lines + skipped_lines
+        );
+    }
     println!("{}", separator);
 
     if !all_delta_chr_f_scores.is_empty() {
@@ -362,6 +415,16 @@ pub fn print_report(examples: &[Example]) {
         } else {
             "-".to_string()
         };
+        let isolated_ws_str = if total_scores > 0 {
+            format!(
+                "{}/{} ({:.1}%)",
+                isolated_whitespace_count,
+                total_scores,
+                isolated_whitespace_count as f32 / total_scores as f32 * 100.0
+            )
+        } else {
+            "-".to_string()
+        };
         let avg_cursor_distance = if cursor_distance_count > 0 {
             Some(cursor_distance_sum as f32 / cursor_distance_count as f32)
         } else {
@@ -392,9 +455,73 @@ pub fn print_report(examples: &[Example]) {
                 avg_dist
             );
         }
+
+        // Print isolated whitespace metrics
+        if total_scores > 0 {
+            println!("Isolated whitespace changes: {}", isolated_ws_str);
+        }
+
+        // Print token change percentile summary (only for predictions with a patch)
+        if !patch_inserted_tokens.is_empty() {
+            patch_inserted_tokens.sort_unstable();
+            patch_deleted_tokens.sort_unstable();
+            let mut patch_total_tokens: Vec<usize> = patch_inserted_tokens
+                .iter()
+                .zip(patch_deleted_tokens.iter())
+                .map(|(i, d)| i + d)
+                .collect();
+            patch_total_tokens.sort_unstable();
+
+            let patch_rate = predictions_with_patch as f32 / total_scores as f32 * 100.0;
+            println!();
+            println!(
+                "Token changes ({}/{} predictions produced a patch, {:.1}% — table includes only those)",
+                predictions_with_patch, total_scores, patch_rate
+            );
+            println!(
+                "{:<20} {:>8} {:>8} {:>8} {:>8} {:>8}",
+                "", "p25", "p50", "p75", "p90", "p99"
+            );
+            println!("{}", "─".repeat(LINE_WIDTH));
+            println!(
+                "{:<20} {:>8} {:>8} {:>8} {:>8} {:>8}",
+                "Inserted tokens",
+                percentile(&patch_inserted_tokens, 25),
+                percentile(&patch_inserted_tokens, 50),
+                percentile(&patch_inserted_tokens, 75),
+                percentile(&patch_inserted_tokens, 90),
+                percentile(&patch_inserted_tokens, 99),
+            );
+            println!(
+                "{:<20} {:>8} {:>8} {:>8} {:>8} {:>8}",
+                "Deleted tokens",
+                percentile(&patch_deleted_tokens, 25),
+                percentile(&patch_deleted_tokens, 50),
+                percentile(&patch_deleted_tokens, 75),
+                percentile(&patch_deleted_tokens, 90),
+                percentile(&patch_deleted_tokens, 99),
+            );
+            println!(
+                "{:<20} {:>8} {:>8} {:>8} {:>8} {:>8}",
+                "Total tokens",
+                percentile(&patch_total_tokens, 25),
+                percentile(&patch_total_tokens, 50),
+                percentile(&patch_total_tokens, 75),
+                percentile(&patch_total_tokens, 90),
+                percentile(&patch_total_tokens, 99),
+            );
+        }
     }
 
     println!("\n");
+}
+
+fn percentile(sorted_values: &[usize], p: usize) -> usize {
+    if sorted_values.is_empty() {
+        return 0;
+    }
+    let idx = (p as f64 / 100.0 * (sorted_values.len() as f64 - 1.0)).round() as usize;
+    sorted_values[idx.min(sorted_values.len() - 1)]
 }
 
 fn truncate_name(name: &str, max_len: usize) -> String {
@@ -429,6 +556,7 @@ pub struct SummaryJson {
     pub cursor_total_evaluated: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrong_editable_region_rate: Option<f32>,
+    pub isolated_whitespace_rate: Option<f32>,
 }
 
 pub fn compute_summary(examples: &[Example]) -> SummaryJson {
@@ -449,6 +577,7 @@ pub fn compute_summary(examples: &[Example]) -> SummaryJson {
     let mut cursor_distance_count: usize = 0;
     let mut wrong_editable_region_count: usize = 0;
     let mut wrong_editable_region_total: usize = 0;
+    let mut isolated_whitespace_count: usize = 0;
 
     for example in examples {
         for (score_idx, score) in example.score.iter().enumerate() {
@@ -480,6 +609,11 @@ pub fn compute_summary(examples: &[Example]) -> SummaryJson {
                 if wrong {
                     wrong_editable_region_count += 1;
                 }
+            }
+
+            // Accumulate isolated whitespace metrics
+            if score.has_isolated_whitespace_changes {
+                isolated_whitespace_count += 1;
             }
 
             // Accumulate cursor metrics
@@ -550,6 +684,12 @@ pub fn compute_summary(examples: &[Example]) -> SummaryJson {
         None
     };
 
+    let isolated_whitespace_rate = if total_scores > 0 {
+        Some(isolated_whitespace_count as f32 / total_scores as f32)
+    } else {
+        None
+    };
+
     SummaryJson {
         total_examples: total_scores,
         avg_delta_chr_f,
@@ -567,6 +707,7 @@ pub fn compute_summary(examples: &[Example]) -> SummaryJson {
         cursor_avg_distance,
         cursor_total_evaluated,
         wrong_editable_region_rate,
+        isolated_whitespace_rate,
     }
 }
 

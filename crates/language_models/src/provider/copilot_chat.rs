@@ -20,15 +20,17 @@ use http_client::StatusCode;
 use language::language_settings::all_language_settings;
 use language_model::{
     AuthenticateError, IconOrSvg, LanguageModel, LanguageModelCompletionError,
-    LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProvider,
-    LanguageModelProviderId, LanguageModelProviderName, LanguageModelProviderState,
-    LanguageModelRequest, LanguageModelRequestMessage, LanguageModelToolChoice,
-    LanguageModelToolResultContent, LanguageModelToolSchemaFormat, LanguageModelToolUse,
-    MessageContent, RateLimiter, Role, StopReason, TokenUsage,
+    LanguageModelCompletionEvent, LanguageModelCostInfo, LanguageModelId, LanguageModelName,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
+    LanguageModelProviderState, LanguageModelRequest, LanguageModelRequestMessage,
+    LanguageModelToolChoice, LanguageModelToolResultContent, LanguageModelToolSchemaFormat,
+    LanguageModelToolUse, MessageContent, RateLimiter, Role, StopReason, TokenUsage,
 };
 use settings::SettingsStore;
 use ui::prelude::*;
 use util::debug_panic;
+
+use crate::provider::util::parse_tool_arguments;
 
 const PROVIDER_ID: LanguageModelProviderId = LanguageModelProviderId::new("copilot_chat");
 const PROVIDER_NAME: LanguageModelProviderName =
@@ -244,6 +246,10 @@ impl LanguageModel for CopilotChatLanguageModel {
         self.model.supports_tools()
     }
 
+    fn supports_streaming_tools(&self) -> bool {
+        true
+    }
+
     fn supports_images(&self) -> bool {
         self.model.supports_vision()
     }
@@ -265,6 +271,13 @@ impl LanguageModel for CopilotChatLanguageModel {
             | LanguageModelToolChoice::Any
             | LanguageModelToolChoice::None => self.supports_tools(),
         }
+    }
+
+    fn model_cost_info(&self) -> Option<LanguageModelCostInfo> {
+        LanguageModelCostInfo::RequestCost {
+            cost_per_request: self.model.multiplier(),
+        }
+        .into()
     }
 
     fn telemetry_id(&self) -> String {
@@ -446,6 +459,23 @@ pub fn map_to_language_model_completion_events(
                                     entry.thought_signature = Some(thought_signature);
                                 }
                             }
+
+                            if !entry.id.is_empty() && !entry.name.is_empty() {
+                                if let Ok(input) = serde_json::from_str::<serde_json::Value>(
+                                    &partial_json_fixer::fix_json(&entry.arguments),
+                                ) {
+                                    events.push(Ok(LanguageModelCompletionEvent::ToolUse(
+                                        LanguageModelToolUse {
+                                            id: entry.id.clone().into(),
+                                            name: entry.name.as_str().into(),
+                                            is_input_complete: false,
+                                            input,
+                                            raw_input: entry.arguments.clone(),
+                                            thought_signature: entry.thought_signature.clone(),
+                                        },
+                                    )));
+                                }
+                            }
                         }
 
                         if let Some(usage) = event.usage {
@@ -493,17 +523,9 @@ pub fn map_to_language_model_completion_events(
                                 }
 
                                 events.extend(state.tool_calls_by_index.drain().map(
-                                    |(_, tool_call)| {
-                                        // The model can output an empty string
-                                        // to indicate the absence of arguments.
-                                        // When that happens, create an empty
-                                        // object instead.
-                                        let arguments = if tool_call.arguments.is_empty() {
-                                            Ok(serde_json::Value::Object(Default::default()))
-                                        } else {
-                                            serde_json::Value::from_str(&tool_call.arguments)
-                                        };
-                                        match arguments {
+                                    |(_, tool_call)| match parse_tool_arguments(
+                                        &tool_call.arguments,
+                                    ) {
                                         Ok(input) => Ok(LanguageModelCompletionEvent::ToolUse(
                                             LanguageModelToolUse {
                                                 id: tool_call.id.into(),
@@ -522,7 +544,6 @@ pub fn map_to_language_model_completion_events(
                                                 json_parse_error: error.to_string(),
                                             },
                                         ),
-                                    }
                                     },
                                 ));
 
@@ -607,7 +628,7 @@ impl CopilotResponsesEventMapper {
                     ..
                 } => {
                     let mut events = Vec::new();
-                    match serde_json::from_str::<serde_json::Value>(&arguments) {
+                    match parse_tool_arguments(&arguments) {
                         Ok(input) => events.push(Ok(LanguageModelCompletionEvent::ToolUse(
                             LanguageModelToolUse {
                                 id: call_id.into(),
@@ -727,7 +748,7 @@ impl CopilotResponsesEventMapper {
             }
 
             copilot_responses::StreamEvent::GenericError { error } => vec![Err(
-                LanguageModelCompletionError::Other(anyhow!(format!("{error:?}"))),
+                LanguageModelCompletionError::Other(anyhow!(error.message)),
             )],
 
             copilot_responses::StreamEvent::Created { .. }
@@ -929,6 +950,8 @@ fn into_copilot_responses(
         stop: _,
         temperature,
         thinking_allowed: _,
+        thinking_effort: _,
+        speed: _,
     } = request;
 
     let mut input_items: Vec<responses::ResponseInputItem> = Vec::new();

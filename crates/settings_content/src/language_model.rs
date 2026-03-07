@@ -2,6 +2,7 @@ use collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
+use strum::EnumString;
 
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ pub struct AllLanguageModelSettingsContent {
     pub openai: Option<OpenAiSettingsContent>,
     pub openai_compatible: Option<HashMap<Arc<str>, OpenAiCompatibleSettingsContent>>,
     pub vercel: Option<VercelSettingsContent>,
+    pub vercel_ai_gateway: Option<VercelAiGatewaySettingsContent>,
     pub x_ai: Option<XAiSettingsContent>,
     #[serde(rename = "zed.dev")]
     pub zed_dot_dev: Option<ZedDotDevSettingsContent>,
@@ -63,6 +65,8 @@ pub struct AmazonBedrockSettingsContent {
     pub profile: Option<String>,
     pub authentication_method: Option<BedrockAuthMethodContent>,
     pub allow_global: Option<bool>,
+    /// Enable the 1M token extended context window beta for supported Anthropic models.
+    pub allow_extended_context: Option<bool>,
 }
 
 #[with_fallible_options]
@@ -97,6 +101,7 @@ pub struct OllamaSettingsContent {
     pub api_url: Option<String>,
     pub auto_discover: Option<bool>,
     pub available_models: Option<Vec<OllamaAvailableModel>>,
+    pub context_window: Option<u64>,
 }
 
 #[with_fallible_options]
@@ -144,6 +149,7 @@ impl Default for KeepAlive {
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
 pub struct LmStudioSettingsContent {
     pub api_url: Option<String>,
+    pub api_key: Option<String>,
     pub available_models: Option<Vec<LmStudioAvailableModel>>,
 }
 
@@ -213,13 +219,15 @@ pub struct OpenAiAvailableModel {
     pub capabilities: OpenAiModelCapabilities,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, JsonSchema, MergeFrom)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, EnumString, JsonSchema, MergeFrom)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum OpenAiReasoningEffort {
     Minimal,
     Low,
     Medium,
     High,
+    XHigh,
 }
 
 #[with_fallible_options]
@@ -294,6 +302,25 @@ pub struct VercelAvailableModel {
     pub max_tokens: u64,
     pub max_output_tokens: Option<u64>,
     pub max_completion_tokens: Option<u64>,
+}
+
+#[with_fallible_options]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
+pub struct VercelAiGatewaySettingsContent {
+    pub api_url: Option<String>,
+    pub available_models: Option<Vec<VercelAiGatewayAvailableModel>>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct VercelAiGatewayAvailableModel {
+    pub name: String,
+    pub display_name: Option<String>,
+    pub max_tokens: u64,
+    pub max_output_tokens: Option<u64>,
+    pub max_completion_tokens: Option<u64>,
+    #[serde(default)]
+    pub capabilities: OpenAiCompatibleModelCapabilities,
 }
 
 #[with_fallible_options]
