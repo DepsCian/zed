@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const START_URL: &str = "https://view.awsapps.com/start";
-const CLIENT_NAME: &str = "Zed Editor";
+const CLIENT_NAME: &str = "Kiro CLI";
 const CLIENT_TYPE: &str = "public";
 const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
