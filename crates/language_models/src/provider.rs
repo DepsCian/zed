@@ -11,7 +11,8 @@ pub mod ollama;
 pub mod open_ai;
 pub mod open_ai_compatible;
 pub mod open_router;
-mod util;
+pub mod opencode;
+
 pub mod vercel;
 pub mod vercel_ai_gateway;
 pub mod x_ai;
